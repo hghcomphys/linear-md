@@ -10,11 +10,26 @@ TARGET = md.x
 # Source files
 SRC = md.cpp
 
-# Build rule
-all: $(SRC)
+SRC: $(SRC)
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRC)
 
-# Clean rule
+run: SRC $(TARGET)
+	time ./$(TARGET)
+
+profile1: $(SRC) 
+	$(CXX) $(CXXFLAGS) -pg  -o $(TARGET) $(SRC)
+	perf stat -e cycles,instructions,cache-references,cache-misses ./$(TARGET)
+
+profile2: $(TARGET)
+	sudo perf record ./$(TARGET)
+	sudo perf report 
+
+.PHONY: all
+all: SRC
+
+.PHONY: clean 
 clean:
 	rm -f $(TARGET) 
+	rm -f perf.data*
+
 
