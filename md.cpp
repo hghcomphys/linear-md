@@ -11,8 +11,6 @@
 
 const double r_cut = 9.0;
 const int cell_max_atoms = 500;
-const int cell_update_frequency = 10;
-const int output_frequency = 100;
 
 struct MDSystem;
 struct MDParameters;
@@ -26,9 +24,11 @@ void initializeVelocity(MDSystem &sys, const double T0);
 void initializeCells(MDSystem &sys);
 void updateCells(MDSystem &sys);
 void computeForce(MDSystem &sys);
-void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params);
-void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params);
+void integrateVerletOne(MDSystem &sys, const MDParameters &params);
+void integrateVerletTwo(MDSystem &sys, const MDParameters &params);
 void saveXyz(const MDSystem &sys);
+void updatePosition0(MDSystem &sys);
+bool checkIfCellsNeedUpdate(const MDSystem &sys, const double threshold);
 
 struct Atom
 {
@@ -36,6 +36,7 @@ struct Atom
     double position[3];
     double velocity[3];
     double force[3];
+    double position0[3];
 };
 
 struct Cell
@@ -81,13 +82,13 @@ int main()
         << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy CellUpdates" << std::endl;
     for (int step = 0; step < params.numberOfSteps; ++step)
     {
-        integrateVelocityVerlet1(sys, params);
-        if (step % cell_update_frequency == 0)
+        integrateVerletOne(sys, params);
+        if (checkIfCellsNeedUpdate(sys, 0.25))
             updateCells(sys);
         computeForce(sys);
-        integrateVelocityVerlet2(sys, params);
+        integrateVerletTwo(sys, params);
 
-        if (step % output_frequency == 0)
+        if (step % 100 == 0)
         {
             const double pe = sys.potentialEnergy;
             const double ke = ComputeKineticEnergy(sys);
@@ -236,9 +237,10 @@ void updateCells(MDSystem &sys)
         cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
     }
     sys.numberOfCellUpdates += 1;
+    updatePosition0(sys);
 }
 
-void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
+void integrateVerletOne(MDSystem &sys, const MDParameters &params)
 {
     double pos;
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
@@ -260,7 +262,7 @@ void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
     }
 }
 
-void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params)
+void integrateVerletTwo(MDSystem &sys, const MDParameters &params)
 {
     for (int n = 0; n < sys.numberOfAtoms; ++n)
     {
@@ -271,6 +273,30 @@ void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params)
     }
 }
 
+void updatePosition0(MDSystem &sys)
+{
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+        for (int d = 0; d < 3; ++d)
+            sys.atoms[n].position0[d] = sys.atoms[n].position[d];
+}
+
+bool checkIfCellsNeedUpdate(const MDSystem &sys, const double threshold)
+{
+    bool needUpdate = false;
+
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    {
+        double r2 = 0.0;
+        for (int d = 0; d < 3; ++d)
+            r2 += sys.atoms[n].position[d] - sys.atoms[n].position0[d];
+        if (r2 > threshold)
+        {
+            needUpdate = true;
+            break;
+        }
+    }
+    return needUpdate;
+}
 std::vector<std::string> getTokens(std::ifstream &input)
 {
     std::string line, token;
@@ -410,7 +436,7 @@ void readRun(MDParameters &params, const std::string &filename)
                 }
                 std::cout << "numberOfSteps = " << params.numberOfSteps << std::endl;
             }
-            else if (tokens[0] == "velocity")
+            else if (tokens[0] == "temperature")
             {
                 params.temperature = getDouble(tokens[1]);
                 if (params.temperature < 0)
@@ -497,16 +523,19 @@ void initializeCells(MDSystem &sys)
             exit(1);
         }
     }
+    std::cout << "Cell sizes = "
+              << sys.cellSizes[0] << " "
+              << sys.cellSizes[1] << " "
+              << sys.cellSizes[2] << " "
+              << std::endl;
 
-    int numberOfCells = 1;
-    for (int d = 0; d < 3; ++d)
-        numberOfCells *= sys.cellSizes[d];
-    sys.grid.resize(numberOfCells);
+    sys.grid.resize(sys.cellSizes[0] * sys.cellSizes[1] * sys.cellSizes[2]);
 
     for (auto &cell : sys.grid)
         cell.atomIndex.resize(cell_max_atoms);
 
     sys.numberOfCellUpdates = 0;
+    updatePosition0(sys);
 }
 
 void saveXyz(const MDSystem &sys)
