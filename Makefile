@@ -2,7 +2,7 @@
 CXX = g++
 
 # Compiler flags
-CXXFLAGS = -O2 -Wall -Wextra -std=c++11
+CXXFLAGS = -O3 -march=native -Wall -Wextra -std=c++11
 
 # Target executable 
 TARGET = md.x

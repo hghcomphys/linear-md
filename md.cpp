@@ -1,4 +1,3 @@
-
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -16,8 +15,8 @@
 #define ITERATE_OVER_DIMS(d) \
     for ((d) = 0; (d) < 3; ++(d))
 
-#define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define K_B 8.617343e-5                  // Boltzmann's constant in natural unit
+#define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define CELL_MAX_ATOMS 500
 
 const double r_cut = 9.0;
@@ -58,7 +57,7 @@ struct MDSystem
     double potentialEnergy;
 };
 
-std::vector<std::string> getTokens(std::ifstream &input) 
+std::vector<std::string> getTokens(std::ifstream &input)
 {
     std::string line, token;
     std::getline(input, line);
@@ -284,49 +283,6 @@ void initializeVelocity(MDSystem &sys, const double T0)
     }
     scaleVelocity(sys, T0);
 }
-
-// bool checkIfNeedUpdate(const MDSystem &sys)
-// {
-//     bool needUpdate = false;
-//     for (int n = 0; n < sys.numberOfAtoms; ++n)
-//     {
-//         double dx = sys.x[n] - sys.x0[n];
-//         double dy = sys.y[n] - sys.y0[n];
-//         double dz = sys.z[n] - sys.z0[n];
-//         if (dx * dx + dy * dy + dz * dz > 0.25)
-//         {
-//             needUpdate = true;
-//             break;
-//         }
-//     }
-//     return needUpdate;
-// }
-
-// void applyPbcOne(double &sx)
-// {
-//     if (sx < 0.0)
-//     {
-//         sx += 1.0;
-//     }
-//     else if (sx > 1.0)
-//     {
-//         sx -= 1.0;
-//     }
-// }
-
-// void findNeighbor(MDSystem &sys)
-// {
-//     if (checkIfNeedUpdate(sys))
-//     {
-//         sys.numberOfUpdates++;
-//         applyPbc(sys);
-//         if (atom.neighbor_flag == 1)
-//             findNeighborON1(atom);
-//         else if (atom.neighbor_flag == 2)
-//             findNeighborON2(atom);
-//         updateXyz0(atom);
-//     }
-// }
 
 void initializeCells(MDSystem &sys)
 {
