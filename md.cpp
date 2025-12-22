@@ -30,14 +30,6 @@ struct MDParameters
     double temperature;
 };
 
-struct Atom
-{
-    double mass;
-    double position[3];
-    double velocity[3];
-    double force[3];
-};
-
 struct Cell
 {
     int numberOfAtomsPerCell;
@@ -47,7 +39,10 @@ struct Cell
 struct MDSystem
 {
     int numberOfAtoms;
-    std::vector<Atom> atoms;
+    std::vector<double> mass;
+    std::vector<double> x, y, z;
+    std::vector<double> vx, vy, vz;
+    std::vector<double> fx, fy, fz;
 
     int cellSizes[3];
     int numberOfCellUpdates;
@@ -102,7 +97,7 @@ int getInt(std::string &token)
 
 void readXyz(MDSystem &sys, const std::string &filename)
 {
-    int n, d, d1, d2;
+    int n, d1, d2;
 
     std::ifstream input(filename);
     if (!input.is_open())
@@ -122,7 +117,16 @@ void readXyz(MDSystem &sys, const std::string &filename)
     std::cout << "Number of atoms = " << sys.numberOfAtoms << std::endl;
 
     // allocate memory
-    sys.atoms.resize(sys.numberOfAtoms);
+    sys.x.resize(sys.numberOfAtoms);
+    sys.y.resize(sys.numberOfAtoms);
+    sys.z.resize(sys.numberOfAtoms);
+    sys.vx.resize(sys.numberOfAtoms);
+    sys.vy.resize(sys.numberOfAtoms);
+    sys.vz.resize(sys.numberOfAtoms);
+    sys.fx.resize(sys.numberOfAtoms);
+    sys.fy.resize(sys.numberOfAtoms);
+    sys.fz.resize(sys.numberOfAtoms);
+    sys.mass.resize(sys.numberOfAtoms);
 
     // line 2
     tokens = getTokens(input);
@@ -154,11 +158,10 @@ void readXyz(MDSystem &sys, const std::string &filename)
                       << std::endl;
             exit(1);
         }
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].position[d] = getDouble(tokens[d + 1]);
-        }
-        sys.atoms[n].mass = getDouble(tokens[4]);
+        sys.x[n] = getDouble(tokens[1]);
+        sys.y[n] = getDouble(tokens[2]);
+        sys.z[n] = getDouble(tokens[3]);
+        sys.mass[n] = getDouble(tokens[4]);
     }
 
     input.close();
@@ -220,33 +223,29 @@ void readRun(MDParameters &params, const std::string &filename)
 
 double ComputeKineticEnergy(const MDSystem &sys)
 {
-    int n, d;
+    int n;
     double kineticEnergy = 0.0;
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        double v2 = 0.0;
-        ITERATE_OVER_DIMS(d)
-        {
-            v2 += sys.atoms[n].velocity[d] * sys.atoms[n].velocity[d];
-        }
-        kineticEnergy += sys.atoms[n].mass * v2;
+        const double v2 =
+            sys.vx[n] * sys.vx[n] + sys.vy[n] * sys.vy[n] + sys.vz[n] * sys.vz[n];
+        kineticEnergy += sys.mass[n] * v2;
     }
     return 0.5 * kineticEnergy;
 }
 
 void scaleVelocity(MDSystem &sys, const double T0)
 {
-    int n, d;
+    int n;
     const double temperature =
         ComputeKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numberOfAtoms);
     double scaleFactor = sqrt(T0 / temperature);
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].velocity[d] *= scaleFactor;
-        }
+        sys.vx[n] *= scaleFactor;
+        sys.vy[n] *= scaleFactor;
+        sys.vz[n] *= scaleFactor;
     }
 }
 
@@ -256,30 +255,29 @@ void initializeVelocity(MDSystem &sys, const double T0)
     srand(42);
 #endif
 
-    int n, d;
+    int n;
     double centerOfMassVelocity[3] = {0.0, 0.0, 0.0};
     double totalMass = 0.0;
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        totalMass += sys.atoms[n].mass;
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].velocity[d] = -1.0 + (rand() * 2.0) / RAND_MAX;
-            centerOfMassVelocity[d] += sys.atoms[n].mass * sys.atoms[n].velocity[d];
-        }
+        totalMass += sys.mass[n];
+        sys.vx[n] = -1.0 + (rand() * 2.0) / RAND_MAX;
+        sys.vy[n] = -1.0 + (rand() * 2.0) / RAND_MAX;
+        sys.vz[n] = -1.0 + (rand() * 2.0) / RAND_MAX;
+        centerOfMassVelocity[0] += sys.mass[n] * sys.vx[n];
+        centerOfMassVelocity[1] += sys.mass[n] * sys.vy[n];
+        centerOfMassVelocity[2] += sys.mass[n] * sys.vz[n];
     }
-    ITERATE_OVER_DIMS(d)
-    {
-        centerOfMassVelocity[d] /= totalMass;
-    }
+    centerOfMassVelocity[0] /= totalMass;
+    centerOfMassVelocity[1] /= totalMass;
+    centerOfMassVelocity[2] /= totalMass;
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].velocity[d] -= centerOfMassVelocity[d];
-        }
+        sys.vx[n] -= centerOfMassVelocity[0];
+        sys.vy[n] -= centerOfMassVelocity[1];
+        sys.vz[n] -= centerOfMassVelocity[2];
     }
     scaleVelocity(sys, T0);
 }
@@ -315,7 +313,7 @@ void initializeCells(MDSystem &sys)
 
 void updateCells(MDSystem &sys)
 {
-    double l;
+    double l[3];
     int n, d, ic[3];
 
     ITERATE_OVER_CELLS(ic, sys.cellSizes)
@@ -323,13 +321,16 @@ void updateCells(MDSystem &sys)
         sys.grid[INDEX(ic, sys.cellSizes)].numberOfAtomsPerCell = 0;
     }
 
+    ITERATE_OVER_DIMS(d)
+    {
+        l[d] = sys.box[d * 3 + d];
+    }
+
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            l = sys.box[d * 3 + d];
-            ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l);
-        }
+        ic[0] = (int)(sys.x[n] * sys.cellSizes[0] / l[0]);
+        ic[1] = (int)(sys.y[n] * sys.cellSizes[1] / l[1]);
+        ic[2] = (int)(sys.z[n] * sys.cellSizes[2] / l[2]);
 
         Cell &cell = sys.grid[INDEX(ic, sys.cellSizes)];
         if (cell.numberOfAtomsPerCell > CELL_MAX_ATOMS)
@@ -361,10 +362,9 @@ void computeForce(MDSystem &sys)
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].force[d] = 0.0;
-        }
+        sys.fx[n] = 0.0;
+        sys.fy[n] = 0.0;
+        sys.fz[n] = 0.0;
     }
     sys.potentialEnergy = 0.0;
 
@@ -411,10 +411,13 @@ void computeForce(MDSystem &sys)
 
                             if (ni < nj)
                             {
+                                r[0] = sys.x[nj] - sys.x[ni];
+                                r[1] = sys.y[nj] - sys.y[ni];
+                                r[2] = sys.z[nj] - sys.z[ni];
+
                                 r2 = 0;
                                 ITERATE_OVER_DIMS(d)
                                 {
-                                    r[d] = sys.atoms[nj].position[d] - sys.atoms[ni].position[d];
                                     // Apply PBC
                                     if (r[d] > l[d] * 0.5)
                                         r[d] -= l[d];
@@ -423,6 +426,7 @@ void computeForce(MDSystem &sys)
 
                                     r2 += r[d] * r[d];
                                 }
+
                                 if (r2 <= cutoffSquare)
                                 {
                                     const double r2inv = 1.0 / r2;
@@ -433,11 +437,13 @@ void computeForce(MDSystem &sys)
                                     const double r14inv = r6inv * r8inv;
                                     const double fij = e24s6 * r8inv - e48s12 * r14inv;
 
-                                    ITERATE_OVER_DIMS(d)
-                                    {
-                                        sys.atoms[ni].force[d] += fij * r[d];
-                                        sys.atoms[nj].force[d] -= fij * r[d];
-                                    }
+                                    sys.fx[ni] += fij * r[0];
+                                    sys.fy[ni] += fij * r[1];
+                                    sys.fz[ni] += fij * r[2];
+                                    sys.fx[nj] -= fij * r[0];
+                                    sys.fy[nj] -= fij * r[1];
+                                    sys.fz[nj] -= fij * r[2];
+
                                     sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
                                 }
                             }
@@ -452,7 +458,7 @@ void computeForce(MDSystem &sys)
 void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
 {
     int n, d;
-    double x;
+    double x, y, z;
     double l[3];
 
     ITERATE_OVER_DIMS(d)
@@ -462,45 +468,56 @@ void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            x = sys.atoms[n].position[d] + params.timeStep * (sys.atoms[n].velocity[d] + params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d]);
-            if ((x < 0.) || (x >= l[d]))
-                x = fmod(x + 100. * l[d], l[d]);
+        x = sys.x[n] + params.timeStep * (sys.vx[n] + params.timeStep * 0.5 / sys.mass[n] * sys.fx[n]);
+        y = sys.y[n] + params.timeStep * (sys.vy[n] + params.timeStep * 0.5 / sys.mass[n] * sys.fy[n]);
+        z = sys.z[n] + params.timeStep * (sys.vz[n] + params.timeStep * 0.5 / sys.mass[n] * sys.fz[n]);
 
-            sys.atoms[n].position[d] = x;
-            sys.atoms[n].velocity[d] += params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d];
-        }
+        if ((x < 0.) || (x >= l[0]))
+            x = fmod(x + 100. * l[0], l[0]);
+        if ((y < 0.) || (y >= l[1]))
+            y = fmod(y + 100. * l[1], l[1]);
+        if ((z < 0.) || (z >= l[2]))
+            z = fmod(z + 100. * l[2], l[2]);
+
+        sys.x[n] = x;
+        sys.y[n] = y;
+        sys.z[n] = z;
+
+        sys.vx[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fx[n];
+        sys.vy[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fy[n];
+        sys.vz[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fz[n];
     }
 }
 
 void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params)
 {
-    int n, d;
+    int n;
 
     ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].velocity[d] += params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d];
-        }
+        sys.vx[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fx[n];
+        sys.vy[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fy[n];
+        sys.vz[n] += params.timeStep * 0.5 / sys.mass[n] * sys.fz[n];
     }
 }
 
 void saveXyz(const MDSystem &sys)
 {
+    int n;
     std::ofstream file("out.xyz", std::ios::app);
     if (!file)
         return;
 
     file << sys.numberOfAtoms << "\n";
     file << "XYZ configuration\n";
-    for (const Atom &atom : sys.atoms)
+
+    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
     {
         file << "Ar" << " "
-             << atom.position[0] << " "
-             << atom.position[1] << " "
-             << atom.position[2] << " "
+             << sys.x[n] << " "
+             << sys.y[n] << " "
+             << sys.z[n] << " "
+             << sys.mass[n] << " "
              << "\n";
     }
     file.close();
