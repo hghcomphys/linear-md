@@ -5,30 +5,30 @@
 #include <iostream>
 #include <sstream>
 
-#define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
-#define ITERATE_OVER_CELLS(ic, nc)                      \
-    for ((ic)[0] = 0; (ic)[0] < (nc)[0]; (ic)[0]++)     \
-        for ((ic)[1] = 0; (ic)[1] < (nc)[1]; (ic)[1]++) \
-            for ((ic)[2] = 0; (ic)[2] < (nc)[2]; (ic)[2]++)
-#define ITERATE_OVER_ATOMS(n, vmax) \
-    for ((n) = 0; (n) < (vmax); ++(n))
-#define ITERATE_OVER_DIMS(d) \
-    for ((d) = 0; (d) < 3; ++(d))
-
 #define K_B 8.617343e-5                  // Boltzmann's constant in natural unit
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
-#define CELL_MAX_ATOMS 500
+#define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
 const double r_cut = 9.0;
+const int cell_max_atoms = 500;
 const int cell_update_frequency = 10;
 const int output_frequency = 100;
 
-struct MDParameters
-{
-    int numberOfSteps;
-    double timeStep;
-    double temperature;
-};
+struct MDSystem;
+struct MDParameters;
+std::vector<std::string> getTokens(std::ifstream &input);
+double getDouble(std::string &token);
+void readXyz(MDSystem &sys, const std::string &filename);
+void readRun(MDParameters &params, const std::string &filename);
+double ComputeKineticEnergy(const MDSystem &sys);
+void scaleVelocity(MDSystem &sys, const double T0);
+void initializeVelocity(MDSystem &sys, const double T0);
+void initializeCells(MDSystem &sys);
+void updateCells(MDSystem &sys);
+void computeForce(MDSystem &sys);
+void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params);
+void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params);
+void saveXyz(const MDSystem &sys);
 
 struct Atom
 {
@@ -44,6 +44,13 @@ struct Cell
     std::vector<int> atomIndex;
 };
 
+struct MDParameters
+{
+    int numberOfSteps;
+    double timeStep;
+    double temperature;
+};
+
 struct MDSystem
 {
     int numberOfAtoms;
@@ -56,6 +63,213 @@ struct MDSystem
     double box[9];
     double potentialEnergy;
 };
+
+// int main(int argc, char **argv)
+int main()
+{
+    MDSystem sys;
+    MDParameters params;
+
+    readRun(params, "run.in");
+    readXyz(sys, "Ar.xyz");
+    initializeVelocity(sys, params.temperature);
+    initializeCells(sys);
+    updateCells(sys);
+    computeForce(sys);
+
+    std::cout
+        << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy CellUpdates" << std::endl;
+    for (int step = 0; step < params.numberOfSteps; ++step)
+    {
+        integrateVelocityVerlet1(sys, params);
+        if (step % cell_update_frequency == 0)
+            updateCells(sys);
+        computeForce(sys);
+        integrateVelocityVerlet2(sys, params);
+
+        if (step % output_frequency == 0)
+        {
+            const double pe = sys.potentialEnergy;
+            const double ke = ComputeKineticEnergy(sys);
+            const double T = ke / (3.0 / 2.0 * K_B * sys.numberOfAtoms);
+            std::cout << step << " "
+                      << T << " "
+                      << ke << " "
+                      << pe << " "
+                      << ke + pe << " "
+                      << sys.numberOfCellUpdates
+                      << std::endl;
+
+            // saveXyz(sys);
+        }
+    }
+
+    return 0;
+}
+
+void computeForce(MDSystem &sys)
+{
+    int ni, nj;
+    int ic[3], kc[3], jc[3];
+    double r[3], r2;
+
+    const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
+    const int *nc = sys.cellSizes;
+
+    const double epsilon = 1.032e-2;
+    const double sigma = 3.405;
+    const double cutoffSquare = r_cut * r_cut;
+    const double sigma3 = sigma * sigma * sigma;
+    const double sigma6 = sigma3 * sigma3;
+    const double sigma12 = sigma6 * sigma6;
+    const double e24s6 = 24.0 * epsilon * sigma6;
+    const double e48s12 = 48.0 * epsilon * sigma12;
+    const double e4s6 = 4.0 * epsilon * sigma6;
+    const double e4s12 = 4.0 * epsilon * sigma12;
+
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+        for (int d = 0; d < 3; ++d)
+            sys.atoms[n].force[d] = 0.0;
+    sys.potentialEnergy = 0.0;
+
+    // Iterate over cells
+    for (ic[0] = 0; ic[0] < nc[0]; ic[0]++)
+        for (ic[1] = 0; ic[1] < nc[1]; ic[1]++)
+            for (ic[2] = 0; ic[2] < nc[2]; ic[2]++)
+            {
+                // Iterate over atoms in cell ic
+                const auto &cell_ic = sys.grid[INDEX(ic, sys.cellSizes)];
+
+                for (int i = 0; i < cell_ic.numberOfAtomsPerCell; ++i)
+                {
+                    ni = cell_ic.atomIndex[i];
+                    const auto &atom_ni = sys.atoms[ni];
+
+                    // Iterate over neighbor cells of cell ic
+                    for (kc[0] = ic[0] - 1; kc[0] <= ic[0] + 1; kc[0]++)
+                    {
+                        if ((kc[0] == -1) || (kc[0] == sys.cellSizes[0]))
+                            jc[0] = (kc[0] + sys.cellSizes[0]) % sys.cellSizes[0];
+                        else
+                            jc[0] = kc[0];
+
+                        for (kc[1] = ic[1] - 1; kc[1] <= ic[1] + 1; kc[1]++)
+                        {
+                            if ((kc[1] == -1) || (kc[1] == sys.cellSizes[1]))
+                                jc[1] = (kc[1] + sys.cellSizes[1]) % sys.cellSizes[1];
+                            else
+                                jc[1] = kc[1];
+
+                            for (kc[2] = ic[2] - 1; kc[2] <= ic[2] + 1; kc[2]++)
+                            {
+                                if ((kc[2] == -1) || (kc[2] == sys.cellSizes[2]))
+                                    jc[2] = (kc[2] + sys.cellSizes[2]) % sys.cellSizes[2];
+                                else
+                                    jc[2] = kc[2];
+
+                                // Iterate over all atoms in cell jc
+                                const auto &cell_jc = sys.grid[INDEX(jc, sys.cellSizes)];
+                                for (int j = 0; j < cell_jc.numberOfAtomsPerCell; ++j)
+                                {
+                                    nj = cell_jc.atomIndex[j];
+                                    const auto &atom_nj = sys.atoms[nj];
+
+                                    if (ni < nj)
+                                    {
+                                        r2 = 0;
+                                        for (int d = 0; d < 3; ++d)
+                                        {
+                                            r[d] = atom_nj.position[d] - atom_ni.position[d];
+                                            // Apply PBC
+                                            if (r[d] > l[d] * 0.5)
+                                                r[d] -= l[d];
+                                            else if (r[d] < -l[d] * 0.5)
+                                                r[d] += l[d];
+
+                                            r2 += r[d] * r[d];
+                                        }
+                                        if (r2 <= cutoffSquare)
+                                        {
+                                            const double r2inv = 1.0 / r2;
+                                            const double r4inv = r2inv * r2inv;
+                                            const double r6inv = r2inv * r4inv;
+                                            const double r8inv = r4inv * r4inv;
+                                            const double r12inv = r4inv * r8inv;
+                                            const double r14inv = r6inv * r8inv;
+                                            const double fij = e24s6 * r8inv - e48s12 * r14inv;
+
+                                            for (int d = 0; d < 3; ++d)
+                                            {
+                                                sys.atoms[ni].force[d] += fij * r[d];
+                                                sys.atoms[nj].force[d] -= fij * r[d];
+                                            }
+                                            sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+}
+
+void updateCells(MDSystem &sys)
+{
+    int ic[3];
+    const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
+
+    for (auto &cell : sys.grid)
+        cell.numberOfAtomsPerCell = 0;
+
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    {
+        for (int d = 0; d < 3; ++d)
+            ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l[d]);
+
+        auto &cell = sys.grid[INDEX(ic, sys.cellSizes)];
+        if (cell.numberOfAtomsPerCell > cell_max_atoms)
+        {
+            std::cerr << "Max number of atoms per cell exceeded: " << cell_max_atoms << std::endl;
+            exit(1);
+        }
+        cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
+    }
+    sys.numberOfCellUpdates += 1;
+}
+
+void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
+{
+    double pos;
+    const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
+    const double dt = params.timeStep;
+
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    {
+        auto &atom = sys.atoms[n];
+
+        for (int d = 0; d < 3; ++d)
+        {
+            pos = atom.position[d] + dt * (atom.velocity[d] + dt * 0.5 / atom.mass * atom.force[d]);
+            if ((pos < 0.) || (pos >= l[d]))
+                pos = fmod(pos + 100. * l[d], l[d]);
+
+            atom.position[d] = pos;
+            atom.velocity[d] += dt * 0.5 / atom.mass * atom.force[d];
+        }
+    }
+}
+
+void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params)
+{
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    {
+        auto &atom = sys.atoms[n];
+
+        for (int d = 0; d < 3; ++d)
+            atom.velocity[d] += params.timeStep * 0.5 / atom.mass * atom.force[d];
+    }
+}
 
 std::vector<std::string> getTokens(std::ifstream &input)
 {
@@ -102,8 +316,6 @@ int getInt(std::string &token)
 
 void readXyz(MDSystem &sys, const std::string &filename)
 {
-    int n, d, d1, d2;
-
     std::ifstream input(filename);
     if (!input.is_open())
     {
@@ -133,9 +345,9 @@ void readXyz(MDSystem &sys, const std::string &filename)
     }
 
     std::cout << "Box matrix H = " << std::endl;
-    ITERATE_OVER_DIMS(d1)
+    for (int d1 = 0; d1 < 3; ++d1)
     {
-        ITERATE_OVER_DIMS(d2)
+        for (int d2 = 0; d2 < 3; ++d2)
         {
             sys.box[d1 * 3 + d2] = getDouble(tokens[d1 * 3 + d2]);
             std::cout << sys.box[d1 * 3 + d2] << " ";
@@ -144,7 +356,7 @@ void readXyz(MDSystem &sys, const std::string &filename)
     }
 
     // starting from line 3
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
     {
         tokens = getTokens(input);
         if (tokens.size() < 5)
@@ -154,10 +366,8 @@ void readXyz(MDSystem &sys, const std::string &filename)
                       << std::endl;
             exit(1);
         }
-        ITERATE_OVER_DIMS(d)
-        {
+        for (int d = 0; d < 3; ++d)
             sys.atoms[n].position[d] = getDouble(tokens[d + 1]);
-        }
         sys.atoms[n].mass = getDouble(tokens[4]);
     }
 
@@ -176,6 +386,7 @@ void readRun(MDParameters &params, const std::string &filename)
     while (input.peek() != EOF)
     {
         std::vector<std::string> tokens = getTokens(input);
+
         if (tokens.size() > 0)
         {
             if (tokens[0] == "time_step")
@@ -220,16 +431,14 @@ void readRun(MDParameters &params, const std::string &filename)
 
 double ComputeKineticEnergy(const MDSystem &sys)
 {
-    int n, d;
+    double v2;
     double kineticEnergy = 0.0;
 
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
     {
-        double v2 = 0.0;
-        ITERATE_OVER_DIMS(d)
-        {
+        v2 = 0.0;
+        for (int d = 0; d < 3; ++d)
             v2 += sys.atoms[n].velocity[d] * sys.atoms[n].velocity[d];
-        }
         kineticEnergy += sys.atoms[n].mass * v2;
     }
     return 0.5 * kineticEnergy;
@@ -237,62 +446,51 @@ double ComputeKineticEnergy(const MDSystem &sys)
 
 void scaleVelocity(MDSystem &sys, const double T0)
 {
-    int n, d;
     const double temperature =
         ComputeKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numberOfAtoms);
     double scaleFactor = sqrt(T0 / temperature);
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
+
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+        for (int d = 0; d < 3; ++d)
             sys.atoms[n].velocity[d] *= scaleFactor;
-        }
-    }
 }
 
 void initializeVelocity(MDSystem &sys, const double T0)
 {
+    double totalMass = 0.0;
+    double centerOfMassVelocity[3] = {0.0, 0.0, 0.0};
+
 #ifndef DEBUG
     srand(42);
 #endif
 
-    int n, d;
-    double centerOfMassVelocity[3] = {0.0, 0.0, 0.0};
-    double totalMass = 0.0;
-
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
     {
         totalMass += sys.atoms[n].mass;
-        ITERATE_OVER_DIMS(d)
+
+        for (int d = 0; d < 3; ++d)
         {
             sys.atoms[n].velocity[d] = -1.0 + (rand() * 2.0) / RAND_MAX;
             centerOfMassVelocity[d] += sys.atoms[n].mass * sys.atoms[n].velocity[d];
         }
     }
-    ITERATE_OVER_DIMS(d)
-    {
+    for (int d = 0; d < 3; ++d)
         centerOfMassVelocity[d] /= totalMass;
-    }
 
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
+    for (int n = 0; n < sys.numberOfAtoms; ++n)
+        for (int d = 0; d < 3; ++d)
             sys.atoms[n].velocity[d] -= centerOfMassVelocity[d];
-        }
-    }
+
     scaleVelocity(sys, T0);
 }
 
 void initializeCells(MDSystem &sys)
 {
-    int d;
-    double l;
+    const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
-    ITERATE_OVER_DIMS(d)
+    for (int d = 0; d < 3; ++d)
     {
-        l = sys.box[d * 3 + d];
-        sys.cellSizes[d] = (int)(l / r_cut);
+        sys.cellSizes[d] = (int)(l[d] / r_cut);
         if (sys.cellSizes[d] < 3)
         {
             std::cerr << "nc[" << d << "]=" << sys.cellSizes[d] << " under PBC, this must be greater than 2!" << std::endl;
@@ -301,190 +499,14 @@ void initializeCells(MDSystem &sys)
     }
 
     int numberOfCells = 1;
-    ITERATE_OVER_DIMS(d)
-    {
+    for (int d = 0; d < 3; ++d)
         numberOfCells *= sys.cellSizes[d];
-    }
     sys.grid.resize(numberOfCells);
 
-    for (Cell &cell : sys.grid)
-        cell.atomIndex.resize(CELL_MAX_ATOMS);
+    for (auto &cell : sys.grid)
+        cell.atomIndex.resize(cell_max_atoms);
 
     sys.numberOfCellUpdates = 0;
-}
-
-void updateCells(MDSystem &sys)
-{
-    double l;
-    int n, d, ic[3];
-
-    ITERATE_OVER_CELLS(ic, sys.cellSizes)
-    {
-        sys.grid[INDEX(ic, sys.cellSizes)].numberOfAtomsPerCell = 0;
-    }
-
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
-            l = sys.box[d * 3 + d];
-            ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l);
-        }
-
-        Cell &cell = sys.grid[INDEX(ic, sys.cellSizes)];
-        if (cell.numberOfAtomsPerCell > CELL_MAX_ATOMS)
-        {
-            std::cerr << "Max number of atoms per cell exceeded: " << CELL_MAX_ATOMS << std::endl;
-            exit(1);
-        }
-        cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
-    }
-    sys.numberOfCellUpdates += 1;
-}
-
-void computeForce(MDSystem &sys)
-{
-    int n, d, ni, nj;
-    int ic[3], kc[3], jc[3];
-    double l[3], r[3], r2;
-
-    const double epsilon = 1.032e-2;
-    const double sigma = 3.405;
-    const double cutoffSquare = r_cut * r_cut;
-    const double sigma3 = sigma * sigma * sigma;
-    const double sigma6 = sigma3 * sigma3;
-    const double sigma12 = sigma6 * sigma6;
-    const double e24s6 = 24.0 * epsilon * sigma6;
-    const double e48s12 = 48.0 * epsilon * sigma12;
-    const double e4s6 = 4.0 * epsilon * sigma6;
-    const double e4s12 = 4.0 * epsilon * sigma12;
-
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].force[d] = 0.0;
-        }
-    }
-    sys.potentialEnergy = 0.0;
-
-    ITERATE_OVER_DIMS(d)
-    {
-        l[d] = sys.box[d * 3 + d];
-    }
-
-    ITERATE_OVER_CELLS(ic, sys.cellSizes)
-    {
-        // Iterate over atoms in cell ic
-        Cell &cell_ic = sys.grid[INDEX(ic, sys.cellSizes)];
-        for (int i = 0; i < cell_ic.numberOfAtomsPerCell; ++i)
-        {
-            ni = cell_ic.atomIndex[i];
-
-            // Iterate over neighbor cells of cell ic
-            for (kc[0] = ic[0] - 1; kc[0] <= ic[0] + 1; kc[0]++)
-            {
-                if ((kc[0] == -1) || (kc[0] == sys.cellSizes[0]))
-                    jc[0] = (kc[0] + sys.cellSizes[0]) % sys.cellSizes[0];
-                else
-                    jc[0] = kc[0];
-
-                for (kc[1] = ic[1] - 1; kc[1] <= ic[1] + 1; kc[1]++)
-                {
-                    if ((kc[1] == -1) || (kc[1] == sys.cellSizes[1]))
-                        jc[1] = (kc[1] + sys.cellSizes[1]) % sys.cellSizes[1];
-                    else
-                        jc[1] = kc[1];
-
-                    for (kc[2] = ic[2] - 1; kc[2] <= ic[2] + 1; kc[2]++)
-                    {
-                        if ((kc[2] == -1) || (kc[2] == sys.cellSizes[2]))
-                            jc[2] = (kc[2] + sys.cellSizes[2]) % sys.cellSizes[2];
-                        else
-                            jc[2] = kc[2];
-
-                        // Iterate over all atoms in cell jc
-                        Cell &cell_jc = sys.grid[INDEX(jc, sys.cellSizes)];
-                        for (int j = 0; j < cell_jc.numberOfAtomsPerCell; ++j)
-                        {
-                            nj = cell_jc.atomIndex[j];
-
-                            if (ni < nj)
-                            {
-                                r2 = 0;
-                                ITERATE_OVER_DIMS(d)
-                                {
-                                    r[d] = sys.atoms[nj].position[d] - sys.atoms[ni].position[d];
-                                    // Apply PBC
-                                    if (r[d] > l[d] * 0.5)
-                                        r[d] -= l[d];
-                                    else if (r[d] < -l[d] * 0.5)
-                                        r[d] += l[d];
-
-                                    r2 += r[d] * r[d];
-                                }
-                                if (r2 <= cutoffSquare)
-                                {
-                                    const double r2inv = 1.0 / r2;
-                                    const double r4inv = r2inv * r2inv;
-                                    const double r6inv = r2inv * r4inv;
-                                    const double r8inv = r4inv * r4inv;
-                                    const double r12inv = r4inv * r8inv;
-                                    const double r14inv = r6inv * r8inv;
-                                    const double fij = e24s6 * r8inv - e48s12 * r14inv;
-
-                                    ITERATE_OVER_DIMS(d)
-                                    {
-                                        sys.atoms[ni].force[d] += fij * r[d];
-                                        sys.atoms[nj].force[d] -= fij * r[d];
-                                    }
-                                    sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-void integrateVelocityVerlet1(MDSystem &sys, const MDParameters &params)
-{
-    int n, d;
-    double x;
-    double l[3];
-
-    ITERATE_OVER_DIMS(d)
-    {
-        l[d] = sys.box[d * 3 + d];
-    }
-
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
-            x = sys.atoms[n].position[d] + params.timeStep * (sys.atoms[n].velocity[d] + params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d]);
-            if ((x < 0.) || (x >= l[d]))
-                x = fmod(x + 100. * l[d], l[d]);
-
-            sys.atoms[n].position[d] = x;
-            sys.atoms[n].velocity[d] += params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d];
-        }
-    }
-}
-
-void integrateVelocityVerlet2(MDSystem &sys, const MDParameters &params)
-{
-    int n, d;
-
-    ITERATE_OVER_ATOMS(n, sys.numberOfAtoms)
-    {
-        ITERATE_OVER_DIMS(d)
-        {
-            sys.atoms[n].velocity[d] += params.timeStep * 0.5 / sys.atoms[n].mass * sys.atoms[n].force[d];
-        }
-    }
 }
 
 void saveXyz(const MDSystem &sys)
@@ -504,40 +526,4 @@ void saveXyz(const MDSystem &sys)
              << "\n";
     }
     file.close();
-}
-
-// int main(int argc, char **argv)
-int main()
-{
-    MDSystem sys;
-    MDParameters params;
-
-    readRun(params, "run.in");
-    readXyz(sys, "Ar.xyz");
-    initializeVelocity(sys, params.temperature);
-    initializeCells(sys);
-    updateCells(sys);
-    computeForce(sys);
-
-    std::cout
-        << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy CellUpdates" << std::endl;
-    for (int step = 0; step < params.numberOfSteps; ++step)
-    {
-        integrateVelocityVerlet1(sys, params);
-        if (step % cell_update_frequency == 0)
-            updateCells(sys);
-        computeForce(sys);
-        integrateVelocityVerlet2(sys, params);
-
-        if (step % output_frequency == 0)
-        {
-            const double pe = sys.potentialEnergy;
-            const double ke = ComputeKineticEnergy(sys);
-            const double T = ke / (3.0 / 2.0 * K_B * sys.numberOfAtoms);
-            std::cout << step << " " << T << " " << ke << " " << pe << " " << ke + pe << " " << sys.numberOfCellUpdates << std::endl;
-            // saveXyz(sys);
-        }
-    }
-
-    return 0;
 }
