@@ -16,7 +16,7 @@ SRC: $(SRC)
 run: SRC $(TARGET)
 	time ./$(TARGET)
 
-profile1: $(SRC) 
+profile: $(SRC) 
 	$(CXX) $(CXXFLAGS) -pg  -o $(TARGET) $(SRC)
 	perf stat -e cycles,instructions,cache-references,cache-misses ./$(TARGET)
 

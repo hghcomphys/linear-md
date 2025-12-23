@@ -1,3 +1,16 @@
+/*
+ * Experimental linear molecular dynamics code implemented using
+ * cell-list and neighbor-list methods.
+ *
+ * References:
+ *  1. https://github.com/a-amouei/fmd
+ *  2. https://github.com/brucefan1983/Molecular-Dynamics-Simulation
+ *
+ * Modified by:
+ *   Hossein Ghorbanfekr (2025)
+ *   https://github.com/hghcomphys
+ */
+
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -9,27 +22,28 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
+const int atomMaxNeighbors = 500;
 const double cutoffRadius = 9.0;
 const double skinRadius = 1.0;
-const int atomMaxNeighbors = 500;
 
-struct MDSystem;
-struct MDParameters;
-std::vector<std::string> getTokens(std::ifstream &input);
+struct System;
+struct Parameters;
+void readXyz(System &sys, const std::string &filename);
+void readRun(Parameters &params, const std::string &filename);
+void scaleVelocity(System &sys, const double T0);
+void initializeVelocity(System &sys, const double T0);
+void initializeNeighbors(System &sys, double cellLength);
+void updateNeighbors(System &sys);
+void computeForce(System &sys);
+void integrateVerletOne(System &sys, const Parameters &params);
+void integrateVerletTwo(System &sys, const Parameters &params);
+void saveXyz(const System &sys);
+void updatePositionOld(System &sys);
+bool checkIfNeighborsNeedUpdate(const System &sys, double threshold);
 double getDouble(std::string &token);
-void readXyz(MDSystem &sys, const std::string &filename);
-void readRun(MDParameters &params, const std::string &filename);
-double ComputeKineticEnergy(const MDSystem &sys);
-void scaleVelocity(MDSystem &sys, const double T0);
-void initializeVelocity(MDSystem &sys, const double T0);
-void initializeNeighbors(MDSystem &sys, double cellLength);
-void updateNeighbors(MDSystem &sys);
-void computeForce(MDSystem &sys);
-void integrateVerletOne(MDSystem &sys, const MDParameters &params);
-void integrateVerletTwo(MDSystem &sys, const MDParameters &params);
-void saveXyz(const MDSystem &sys);
-void updatePositionOld(MDSystem &sys);
-bool checkIfNeighborsNeedUpdate(const MDSystem &sys, double threshold);
+double getKineticEnergy(const System &sys);
+std::vector<std::string> getTokens(std::ifstream &input);
+inline void applyPBC(double &r, const double l);
 
 struct Atom
 {
@@ -47,14 +61,14 @@ struct Cell
     std::vector<int> atomIndex;
 };
 
-struct MDParameters
+struct Parameters
 {
     int numberOfSteps;
     double timeStep;
     double temperature;
 };
 
-struct MDSystem
+struct System
 {
     int numberOfAtoms;
     std::vector<Atom> atoms;
@@ -74,18 +88,21 @@ struct MDSystem
 // int main(int argc, char **argv)
 int main()
 {
-    MDSystem sys;
-    MDParameters params;
+    System sys;
+    Parameters params;
 
     readRun(params, "run.in");
     readXyz(sys, "Ar.xyz");
     initializeVelocity(sys, params.temperature);
     initializeNeighbors(sys, cutoffRadius);
+
     updateNeighbors(sys);
     computeForce(sys);
 
     std::cout
-        << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy NeighborUpdates AverageNeighbors" << std::endl;
+        << "Step Temperature KineticEnergy  PotentialEnergy"
+        << "TotalEnergy NeighborUpdates AverageNeighbors"
+        << std::endl;
     for (int step = 0; step < params.numberOfSteps; ++step)
     {
         integrateVerletOne(sys, params);
@@ -96,8 +113,9 @@ int main()
 
         if (step % 100 == 0)
         {
+            // saveXyz(sys);
             const double pe = sys.potentialEnergy;
-            const double ke = ComputeKineticEnergy(sys);
+            const double ke = getKineticEnergy(sys);
             const double T = ke / (3.0 / 2.0 * K_B * sys.numberOfAtoms);
 
             double averageNeighbors = 0.0;
@@ -113,23 +131,13 @@ int main()
                       << sys.cellUpdates << " "
                       << averageNeighbors << " "
                       << std::endl;
-
-            // saveXyz(sys);
         }
     }
 
     return 0;
 }
 
-inline void applyPBC(double &r, const double l)
-{
-    if (r > l * 0.5)
-        r -= l;
-    else if (r < -l * 0.5)
-        r += l;
-}
-
-void computeForce(MDSystem &sys)
+void computeForce(System &sys)
 {
     double r[3];
 
@@ -187,7 +195,7 @@ void computeForce(MDSystem &sys)
     }
 }
 
-void updateNeighborList(MDSystem &sys)
+void updateNeighborList(System &sys)
 {
     double r[3];
     int ni, nj, ic[3], jc[3], kc[3];
@@ -272,7 +280,7 @@ void updateNeighborList(MDSystem &sys)
     updatePositionOld(sys);
 }
 
-void updateCellList(MDSystem &sys)
+void updateCellList(System &sys)
 {
     double ic[3];
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
@@ -295,7 +303,7 @@ void updateCellList(MDSystem &sys)
     }
 }
 
-void updateNeighbors(MDSystem &sys)
+void updateNeighbors(System &sys)
 {
     updateCellList(sys);
     updateNeighborList(sys);
@@ -304,7 +312,7 @@ void updateNeighbors(MDSystem &sys)
     sys.cellUpdates += 1;
 }
 
-void integrateVerletOne(MDSystem &sys, const MDParameters &params)
+void integrateVerletOne(System &sys, const Parameters &params)
 {
     double pos;
 
@@ -327,7 +335,7 @@ void integrateVerletOne(MDSystem &sys, const MDParameters &params)
     }
 }
 
-void integrateVerletTwo(MDSystem &sys, const MDParameters &params)
+void integrateVerletTwo(System &sys, const Parameters &params)
 {
     for (int n = 0; n < sys.numberOfAtoms; ++n)
     {
@@ -338,14 +346,14 @@ void integrateVerletTwo(MDSystem &sys, const MDParameters &params)
     }
 }
 
-void updatePositionOld(MDSystem &sys)
+void updatePositionOld(System &sys)
 {
     for (int n = 0; n < sys.numberOfAtoms; ++n)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].positionOld[d] = sys.atoms[n].position[d];
 }
 
-bool checkIfNeighborsNeedUpdate(const MDSystem &sys, double threshold)
+bool checkIfNeighborsNeedUpdate(const System &sys, double threshold)
 {
     bool needUpdate = false;
 
@@ -405,7 +413,7 @@ int getInt(std::string &token)
     return value;
 }
 
-void readXyz(MDSystem &sys, const std::string &filename)
+void readXyz(System &sys, const std::string &filename)
 {
     std::ifstream input(filename);
     if (!input.is_open())
@@ -465,7 +473,7 @@ void readXyz(MDSystem &sys, const std::string &filename)
     input.close();
 }
 
-void readRun(MDParameters &params, const std::string &filename)
+void readRun(Parameters &params, const std::string &filename)
 {
     std::ifstream input(filename);
     if (!input.is_open())
@@ -520,7 +528,7 @@ void readRun(MDParameters &params, const std::string &filename)
     }
 }
 
-double ComputeKineticEnergy(const MDSystem &sys)
+double getKineticEnergy(const System &sys)
 {
     double v2;
     double kineticEnergy = 0.0;
@@ -535,10 +543,10 @@ double ComputeKineticEnergy(const MDSystem &sys)
     return 0.5 * kineticEnergy;
 }
 
-void scaleVelocity(MDSystem &sys, const double T0)
+void scaleVelocity(System &sys, const double T0)
 {
     const double temperature =
-        ComputeKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numberOfAtoms);
+        getKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numberOfAtoms);
     double scaleFactor = sqrt(T0 / temperature);
 
     for (int n = 0; n < sys.numberOfAtoms; ++n)
@@ -546,7 +554,7 @@ void scaleVelocity(MDSystem &sys, const double T0)
             sys.atoms[n].velocity[d] *= scaleFactor;
 }
 
-void initializeVelocity(MDSystem &sys, const double T0)
+void initializeVelocity(System &sys, const double T0)
 {
     double totalMass = 0.0;
     double centerOfMassVelocity[3] = {0.0, 0.0, 0.0};
@@ -575,7 +583,7 @@ void initializeVelocity(MDSystem &sys, const double T0)
     scaleVelocity(sys, T0);
 }
 
-void initializeNeighbors(MDSystem &sys, double cellLength)
+void initializeNeighbors(System &sys, double cellLength)
 {
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
@@ -612,7 +620,14 @@ void initializeNeighbors(MDSystem &sys, double cellLength)
     sys.cellUpdates = 0;
 }
 
-void saveXyz(const MDSystem &sys)
+inline void applyPBC(double &r, const double l)
+{
+    if (r > l * 0.5)
+        r -= l;
+    else if (r < -l * 0.5)
+        r += l;
+}
+void saveXyz(const System &sys)
 {
     std::ofstream file("out.xyz", std::ios::app);
     if (!file)
