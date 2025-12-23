@@ -9,7 +9,9 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
-const double cutoff = 9;
+const double cutoffRadius = 9.0;
+const double skinRadius = 1.0;
+const int atomMaxNeighbors = 500;
 
 struct MDSystem;
 struct MDParameters;
@@ -20,14 +22,14 @@ void readRun(MDParameters &params, const std::string &filename);
 double ComputeKineticEnergy(const MDSystem &sys);
 void scaleVelocity(MDSystem &sys, const double T0);
 void initializeVelocity(MDSystem &sys, const double T0);
-void initializeCellList(MDSystem &sys);
-void updateCellList(MDSystem &sys);
+void initializeNeighbors(MDSystem &sys, double cellLength);
+void updateNeighbors(MDSystem &sys);
 void computeForce(MDSystem &sys);
 void integrateVerletOne(MDSystem &sys, const MDParameters &params);
 void integrateVerletTwo(MDSystem &sys, const MDParameters &params);
 void saveXyz(const MDSystem &sys);
-void updatePosition0(MDSystem &sys);
-bool checkIfCellListNeedUpdate(const MDSystem &sys, const double threshold);
+void updatePositionOld(MDSystem &sys);
+bool checkIfNeighborsNeedUpdate(const MDSystem &sys, double threshold);
 
 struct Atom
 {
@@ -35,7 +37,8 @@ struct Atom
     double position[3];
     double velocity[3];
     double force[3];
-    double position0[3];
+
+    double positionOld[3];
 };
 
 struct Cell
@@ -57,9 +60,12 @@ struct MDSystem
     std::vector<Atom> atoms;
 
     int cellSizes[3];
-    int numberOfCellUpdates;
-    int maxAtomsPerCell;
+    int cellUpdates;
+    int cellMaxAtoms;
     std::vector<Cell> grid;
+
+    std::vector<int> neighborIndex;
+    std::vector<int> neighborCount;
 
     double box[9];
     double potentialEnergy;
@@ -74,17 +80,17 @@ int main()
     readRun(params, "run.in");
     readXyz(sys, "Ar.xyz");
     initializeVelocity(sys, params.temperature);
-    initializeCellList(sys);
-    updateCellList(sys);
+    initializeNeighbors(sys, cutoffRadius);
+    updateNeighbors(sys);
     computeForce(sys);
 
     std::cout
-        << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy CellUpdates" << std::endl;
+        << "Step Temperature KineticEnergy  PotentialEnergy TotalEnergy NeighborUpdates AverageNeighbors" << std::endl;
     for (int step = 0; step < params.numberOfSteps; ++step)
     {
         integrateVerletOne(sys, params);
-        if (checkIfCellListNeedUpdate(sys, 0.25))
-            updateCellList(sys);
+        if (checkIfNeighborsNeedUpdate(sys, 0.25 * skinRadius * skinRadius))
+            updateNeighbors(sys);
         computeForce(sys);
         integrateVerletTwo(sys, params);
 
@@ -93,12 +99,19 @@ int main()
             const double pe = sys.potentialEnergy;
             const double ke = ComputeKineticEnergy(sys);
             const double T = ke / (3.0 / 2.0 * K_B * sys.numberOfAtoms);
+
+            double averageNeighbors = 0.0;
+            for (int count : sys.neighborCount)
+                averageNeighbors += (double)(count);
+            averageNeighbors /= sys.numberOfAtoms;
+
             std::cout << step << " "
                       << T << " "
                       << ke << " "
                       << pe << " "
                       << ke + pe << " "
-                      << sys.numberOfCellUpdates
+                      << sys.cellUpdates << " "
+                      << averageNeighbors << " "
                       << std::endl;
 
             // saveXyz(sys);
@@ -118,16 +131,12 @@ inline void applyPBC(double &r, const double l)
 
 void computeForce(MDSystem &sys)
 {
-    int ni, nj;
-    int ic[3], kc[3], jc[3];
     double r[3];
 
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
-    const int *nc = sys.cellSizes;
-
     const double epsilon = 1.032e-2;
     const double sigma = 3.405;
-    const double cutoffSquare = cutoff * cutoff;
+    const double cutoffSquare = cutoffRadius * cutoffRadius;
     const double sigma3 = sigma * sigma * sigma;
     const double sigma6 = sigma3 * sigma3;
     const double sigma12 = sigma6 * sigma6;
@@ -140,6 +149,54 @@ void computeForce(MDSystem &sys)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].force[d] = 0.0;
     sys.potentialEnergy = 0.0;
+
+    for (int ni = 0; ni < sys.numberOfAtoms; ni++)
+    {
+        for (int j = 0; j < sys.neighborCount[ni]; j++)
+        {
+            const int nj = sys.neighborIndex[ni * atomMaxNeighbors + j];
+
+            if (ni < nj)
+            {
+                double r2 = 0.0;
+                for (int d = 0; d < 3; ++d)
+                {
+                    r[d] = sys.atoms[nj].position[d] - sys.atoms[ni].position[d];
+                    applyPBC(r[d], l[d]);
+                    r2 += r[d] * r[d];
+                }
+                if (r2 > cutoffSquare)
+                    continue;
+
+                const double r2inv = 1.0 / r2;
+                const double r4inv = r2inv * r2inv;
+                const double r6inv = r2inv * r4inv;
+                const double r8inv = r4inv * r4inv;
+                const double r12inv = r4inv * r8inv;
+                const double r14inv = r6inv * r8inv;
+                const double fij = e24s6 * r8inv - e48s12 * r14inv;
+
+                for (int d = 0; d < 3; ++d)
+                {
+                    sys.atoms[ni].force[d] += fij * r[d];
+                    sys.atoms[nj].force[d] -= fij * r[d];
+                }
+                sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
+            }
+        }
+    }
+}
+
+void updateNeighborList(MDSystem &sys)
+{
+    double r[3];
+    int ni, nj, ic[3], jc[3], kc[3];
+
+    const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
+    const int *nc = sys.cellSizes;
+    const double neighborCutoff = cutoffRadius + skinRadius;
+    const double squaredNeighborCutoff = neighborCutoff * neighborCutoff;
+    std::fill(sys.neighborCount.begin(), sys.neighborCount.end(), 0);
 
     // Iterate over cells
     for (ic[0] = 0; ic[0] < nc[0]; ic[0]++)
@@ -181,10 +238,11 @@ void computeForce(MDSystem &sys)
                                 for (int j = 0; j < cell_jc.numberOfAtomsPerCell; ++j)
                                 {
                                     nj = cell_jc.atomIndex[j];
-                                    const auto &atom_nj = sys.atoms[nj];
 
-                                    if (ni < nj)
+                                    if (ni < nj) // bug in original code
                                     {
+                                        const auto &atom_nj = sys.atoms[nj];
+
                                         double r2 = 0.0;
                                         for (int d = 0; d < 3; ++d)
                                         {
@@ -192,23 +250,17 @@ void computeForce(MDSystem &sys)
                                             applyPBC(r[d], l[d]);
                                             r2 += r[d] * r[d];
                                         }
-                                        if (r2 > cutoffSquare)
-                                            continue;
-
-                                        const double r2inv = 1.0 / r2;
-                                        const double r4inv = r2inv * r2inv;
-                                        const double r6inv = r2inv * r4inv;
-                                        const double r8inv = r4inv * r4inv;
-                                        const double r12inv = r4inv * r8inv;
-                                        const double r14inv = r6inv * r8inv;
-                                        const double fij = e24s6 * r8inv - e48s12 * r14inv;
-
-                                        for (int d = 0; d < 3; ++d)
+                                        if (r2 < squaredNeighborCutoff)
                                         {
-                                            sys.atoms[ni].force[d] += fij * r[d];
-                                            sys.atoms[nj].force[d] -= fij * r[d];
+                                            sys.neighborIndex[ni * atomMaxNeighbors + sys.neighborCount[ni]++] = nj;
+                                            sys.neighborIndex[nj * atomMaxNeighbors + sys.neighborCount[nj]++] = ni;
+
+                                            if ((sys.neighborCount[ni] > atomMaxNeighbors) || (sys.neighborCount[nj] > atomMaxNeighbors))
+                                            {
+                                                std::cout << "Error: max number of neighbors exceeds!" << std::endl;
+                                                exit(1);
+                                            }
                                         }
-                                        sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
                                     }
                                 }
                             }
@@ -216,11 +268,13 @@ void computeForce(MDSystem &sys)
                     }
                 }
             }
+
+    updatePositionOld(sys);
 }
 
 void updateCellList(MDSystem &sys)
 {
-    int ic[3];
+    double ic[3];
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
     for (auto &cell : sys.grid)
@@ -232,20 +286,28 @@ void updateCellList(MDSystem &sys)
             ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l[d]);
 
         auto &cell = sys.grid[INDEX(ic, sys.cellSizes)];
-        if (cell.numberOfAtomsPerCell > sys.maxAtomsPerCell)
+        if (cell.numberOfAtomsPerCell > sys.cellMaxAtoms)
         {
-            std::cerr << "Max number of atoms per cell exceeded: " << sys.maxAtomsPerCell << std::endl;
+            std::cerr << "Max number of atoms per cell exceeded: " << sys.cellMaxAtoms << std::endl;
             exit(1);
         }
         cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
     }
-    sys.numberOfCellUpdates += 1;
-    updatePosition0(sys);
+}
+
+void updateNeighbors(MDSystem &sys)
+{
+    updateCellList(sys);
+    updateNeighborList(sys);
+
+    // Update cells
+    sys.cellUpdates += 1;
 }
 
 void integrateVerletOne(MDSystem &sys, const MDParameters &params)
 {
     double pos;
+
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
     const double dt = params.timeStep;
 
@@ -276,14 +338,14 @@ void integrateVerletTwo(MDSystem &sys, const MDParameters &params)
     }
 }
 
-void updatePosition0(MDSystem &sys)
+void updatePositionOld(MDSystem &sys)
 {
     for (int n = 0; n < sys.numberOfAtoms; ++n)
         for (int d = 0; d < 3; ++d)
-            sys.atoms[n].position0[d] = sys.atoms[n].position[d];
+            sys.atoms[n].positionOld[d] = sys.atoms[n].position[d];
 }
 
-bool checkIfCellListNeedUpdate(const MDSystem &sys, const double threshold)
+bool checkIfNeighborsNeedUpdate(const MDSystem &sys, double threshold)
 {
     bool needUpdate = false;
 
@@ -291,7 +353,7 @@ bool checkIfCellListNeedUpdate(const MDSystem &sys, const double threshold)
     {
         double r2 = 0.0;
         for (int d = 0; d < 3; ++d)
-            r2 += sys.atoms[n].position[d] - sys.atoms[n].position0[d];
+            r2 += sys.atoms[n].position[d] - sys.atoms[n].positionOld[d];
         if (r2 > threshold)
         {
             needUpdate = true;
@@ -513,9 +575,8 @@ void initializeVelocity(MDSystem &sys, const double T0)
     scaleVelocity(sys, T0);
 }
 
-void initializeCellList(MDSystem &sys)
+void initializeNeighbors(MDSystem &sys, double cellLength)
 {
-    const double cellLength = cutoff;
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
     for (int d = 0; d < 3; ++d)
@@ -538,14 +599,17 @@ void initializeCellList(MDSystem &sys)
 
     const double systemVolume = l[0] * l[1] * l[2];
     const double cellVolume = cellLength * cellLength * cellLength;
-    sys.maxAtomsPerCell = 3 * (int)(sys.numberOfAtoms / systemVolume * cellVolume);
-    std::cout << "Cell max atoms = " << sys.maxAtomsPerCell << std::endl;
+    sys.cellMaxAtoms = 3 * (int)(sys.numberOfAtoms / systemVolume * cellVolume);
+    std::cout << "Cell max atoms = " << sys.cellMaxAtoms << std::endl;
 
     for (auto &cell : sys.grid)
-        cell.atomIndex.resize(sys.maxAtomsPerCell);
+        cell.atomIndex.resize(sys.cellMaxAtoms);
 
-    sys.numberOfCellUpdates = 0;
-    updatePosition0(sys);
+    sys.neighborCount.resize(sys.numberOfAtoms);
+    sys.neighborIndex.resize(sys.numberOfAtoms * atomMaxNeighbors);
+    updatePositionOld(sys);
+
+    sys.cellUpdates = 0;
 }
 
 void saveXyz(const MDSystem &sys)
