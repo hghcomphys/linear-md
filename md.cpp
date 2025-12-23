@@ -9,8 +9,7 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
-const double r_cut = 9.0;
-const int cell_max_atoms = 500;
+const double cutoff = 9;
 
 struct MDSystem;
 struct MDParameters;
@@ -21,14 +20,14 @@ void readRun(MDParameters &params, const std::string &filename);
 double ComputeKineticEnergy(const MDSystem &sys);
 void scaleVelocity(MDSystem &sys, const double T0);
 void initializeVelocity(MDSystem &sys, const double T0);
-void initializeCells(MDSystem &sys);
-void updateCells(MDSystem &sys);
+void initializeCellList(MDSystem &sys);
+void updateCellList(MDSystem &sys);
 void computeForce(MDSystem &sys);
 void integrateVerletOne(MDSystem &sys, const MDParameters &params);
 void integrateVerletTwo(MDSystem &sys, const MDParameters &params);
 void saveXyz(const MDSystem &sys);
 void updatePosition0(MDSystem &sys);
-bool checkIfCellsNeedUpdate(const MDSystem &sys, const double threshold);
+bool checkIfCellListNeedUpdate(const MDSystem &sys, const double threshold);
 
 struct Atom
 {
@@ -59,6 +58,7 @@ struct MDSystem
 
     int cellSizes[3];
     int numberOfCellUpdates;
+    int maxAtomsPerCell;
     std::vector<Cell> grid;
 
     double box[9];
@@ -74,8 +74,8 @@ int main()
     readRun(params, "run.in");
     readXyz(sys, "Ar.xyz");
     initializeVelocity(sys, params.temperature);
-    initializeCells(sys);
-    updateCells(sys);
+    initializeCellList(sys);
+    updateCellList(sys);
     computeForce(sys);
 
     std::cout
@@ -83,8 +83,8 @@ int main()
     for (int step = 0; step < params.numberOfSteps; ++step)
     {
         integrateVerletOne(sys, params);
-        if (checkIfCellsNeedUpdate(sys, 0.25))
-            updateCells(sys);
+        if (checkIfCellListNeedUpdate(sys, 0.25))
+            updateCellList(sys);
         computeForce(sys);
         integrateVerletTwo(sys, params);
 
@@ -108,18 +108,26 @@ int main()
     return 0;
 }
 
+inline void applyPBC(double &r, const double l)
+{
+    if (r > l * 0.5)
+        r -= l;
+    else if (r < -l * 0.5)
+        r += l;
+}
+
 void computeForce(MDSystem &sys)
 {
     int ni, nj;
     int ic[3], kc[3], jc[3];
-    double r[3], r2;
+    double r[3];
 
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
     const int *nc = sys.cellSizes;
 
     const double epsilon = 1.032e-2;
     const double sigma = 3.405;
-    const double cutoffSquare = r_cut * r_cut;
+    const double cutoffSquare = cutoff * cutoff;
     const double sigma3 = sigma * sigma * sigma;
     const double sigma6 = sigma3 * sigma3;
     const double sigma12 = sigma6 * sigma6;
@@ -177,35 +185,30 @@ void computeForce(MDSystem &sys)
 
                                     if (ni < nj)
                                     {
-                                        r2 = 0;
+                                        double r2 = 0.0;
                                         for (int d = 0; d < 3; ++d)
                                         {
                                             r[d] = atom_nj.position[d] - atom_ni.position[d];
-                                            // Apply PBC
-                                            if (r[d] > l[d] * 0.5)
-                                                r[d] -= l[d];
-                                            else if (r[d] < -l[d] * 0.5)
-                                                r[d] += l[d];
-
+                                            applyPBC(r[d], l[d]);
                                             r2 += r[d] * r[d];
                                         }
-                                        if (r2 <= cutoffSquare)
-                                        {
-                                            const double r2inv = 1.0 / r2;
-                                            const double r4inv = r2inv * r2inv;
-                                            const double r6inv = r2inv * r4inv;
-                                            const double r8inv = r4inv * r4inv;
-                                            const double r12inv = r4inv * r8inv;
-                                            const double r14inv = r6inv * r8inv;
-                                            const double fij = e24s6 * r8inv - e48s12 * r14inv;
+                                        if (r2 > cutoffSquare)
+                                            continue;
 
-                                            for (int d = 0; d < 3; ++d)
-                                            {
-                                                sys.atoms[ni].force[d] += fij * r[d];
-                                                sys.atoms[nj].force[d] -= fij * r[d];
-                                            }
-                                            sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
+                                        const double r2inv = 1.0 / r2;
+                                        const double r4inv = r2inv * r2inv;
+                                        const double r6inv = r2inv * r4inv;
+                                        const double r8inv = r4inv * r4inv;
+                                        const double r12inv = r4inv * r8inv;
+                                        const double r14inv = r6inv * r8inv;
+                                        const double fij = e24s6 * r8inv - e48s12 * r14inv;
+
+                                        for (int d = 0; d < 3; ++d)
+                                        {
+                                            sys.atoms[ni].force[d] += fij * r[d];
+                                            sys.atoms[nj].force[d] -= fij * r[d];
                                         }
+                                        sys.potentialEnergy += e4s12 * r12inv - e4s6 * r6inv;
                                     }
                                 }
                             }
@@ -215,7 +218,7 @@ void computeForce(MDSystem &sys)
             }
 }
 
-void updateCells(MDSystem &sys)
+void updateCellList(MDSystem &sys)
 {
     int ic[3];
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
@@ -229,9 +232,9 @@ void updateCells(MDSystem &sys)
             ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l[d]);
 
         auto &cell = sys.grid[INDEX(ic, sys.cellSizes)];
-        if (cell.numberOfAtomsPerCell > cell_max_atoms)
+        if (cell.numberOfAtomsPerCell > sys.maxAtomsPerCell)
         {
-            std::cerr << "Max number of atoms per cell exceeded: " << cell_max_atoms << std::endl;
+            std::cerr << "Max number of atoms per cell exceeded: " << sys.maxAtomsPerCell << std::endl;
             exit(1);
         }
         cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
@@ -280,7 +283,7 @@ void updatePosition0(MDSystem &sys)
             sys.atoms[n].position0[d] = sys.atoms[n].position[d];
 }
 
-bool checkIfCellsNeedUpdate(const MDSystem &sys, const double threshold)
+bool checkIfCellListNeedUpdate(const MDSystem &sys, const double threshold)
 {
     bool needUpdate = false;
 
@@ -510,19 +513,21 @@ void initializeVelocity(MDSystem &sys, const double T0)
     scaleVelocity(sys, T0);
 }
 
-void initializeCells(MDSystem &sys)
+void initializeCellList(MDSystem &sys)
 {
+    const double cellLength = cutoff;
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
     for (int d = 0; d < 3; ++d)
     {
-        sys.cellSizes[d] = (int)(l[d] / r_cut);
+        sys.cellSizes[d] = (int)(l[d] / cellLength);
         if (sys.cellSizes[d] < 3)
         {
             std::cerr << "nc[" << d << "]=" << sys.cellSizes[d] << " under PBC, this must be greater than 2!" << std::endl;
             exit(1);
         }
     }
+    std::cout << "Cell length = " << cellLength << std::endl;
     std::cout << "Cell sizes = "
               << sys.cellSizes[0] << " "
               << sys.cellSizes[1] << " "
@@ -531,8 +536,13 @@ void initializeCells(MDSystem &sys)
 
     sys.grid.resize(sys.cellSizes[0] * sys.cellSizes[1] * sys.cellSizes[2]);
 
+    const double systemVolume = l[0] * l[1] * l[2];
+    const double cellVolume = cellLength * cellLength * cellLength;
+    sys.maxAtomsPerCell = 3 * (int)(sys.numberOfAtoms / systemVolume * cellVolume);
+    std::cout << "Cell max atoms = " << sys.maxAtomsPerCell << std::endl;
+
     for (auto &cell : sys.grid)
-        cell.atomIndex.resize(cell_max_atoms);
+        cell.atomIndex.resize(sys.maxAtomsPerCell);
 
     sys.numberOfCellUpdates = 0;
     updatePosition0(sys);
