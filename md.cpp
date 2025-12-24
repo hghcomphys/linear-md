@@ -22,28 +22,30 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
-const int atomMaxNeighbors = 500;
+const int numSteps = 1001;
+const int maxNeighbors = 500;
 const double cutoffRadius = 9.0;
 const double skinRadius = 1.0;
+const double timeStep = 0.5 / TIME_UNIT_CONVERSION; // fs
+const double temperature = 60;                      // K
 
 struct System;
-struct Parameters;
 void readXyz(System &sys, const std::string &filename);
-void readRun(Parameters &params, const std::string &filename);
 void scaleVelocity(System &sys, const double T0);
 void initializeVelocity(System &sys, const double T0);
 void initializeNeighbors(System &sys, double cellLength);
 void updateNeighbors(System &sys);
 void computeForce(System &sys);
-void integrateVerletOne(System &sys, const Parameters &params);
-void integrateVerletTwo(System &sys, const Parameters &params);
+void verletIntegrationPosition(System &sys);
+void verletIntegrationVelocity(System &sys);
 void saveXyz(const System &sys);
 void updatePositionOld(System &sys);
-bool checkIfNeighborsNeedUpdate(const System &sys, double threshold);
+bool checkIfNeighborsNeedUpdate(const System &sys);
 double getDouble(std::string &token);
-double getKineticEnergy(const System &sys);
-std::vector<std::string> getTokens(std::ifstream &input);
+inline double getKineticEnergy(const System &sys);
+inline double getTemperature(const System &sys);
 inline void applyPBC(double &r, const double l);
+std::vector<std::string> getTokens(std::ifstream &input);
 
 struct Atom
 {
@@ -57,43 +59,36 @@ struct Atom
 
 struct Cell
 {
-    int numberOfAtomsPerCell;
+    int numAtomsPerCell;
     std::vector<int> atomIndex;
 };
 
-struct Parameters
+struct Neighbor
 {
-    int numberOfSteps;
-    double timeStep;
-    double temperature;
+    int numNeighborsPerAtom;
+    std::vector<int> neighborIndex;
 };
 
 struct System
 {
-    int numberOfAtoms;
-    std::vector<Atom> atoms;
-
-    int cellSizes[3];
-    int cellUpdates;
-    int cellMaxAtoms;
-    std::vector<Cell> grid;
-
-    std::vector<int> neighborIndex;
-    std::vector<int> neighborCount;
-
+    int numAtoms;
     double box[9];
     double potentialEnergy;
+    std::vector<Atom> atoms;
+
+    int numUpdates;
+    int cellSizes[3];
+    int cellMaxAtoms;
+    std::vector<Cell> grid;
+    std::vector<Neighbor> neighbors;
 };
 
-// int main(int argc, char **argv)
 int main()
 {
     System sys;
-    Parameters params;
 
-    readRun(params, "run.in");
     readXyz(sys, "Ar.xyz");
-    initializeVelocity(sys, params.temperature);
+    initializeVelocity(sys, temperature);
     initializeNeighbors(sys, cutoffRadius);
 
     updateNeighbors(sys);
@@ -101,34 +96,33 @@ int main()
 
     std::cout
         << "Step Temperature KineticEnergy  PotentialEnergy"
-        << "TotalEnergy NeighborUpdates AverageNeighbors"
+        << "TotalEnergy NeighborListUpdates AverageNeighbors"
         << std::endl;
-    for (int step = 0; step < params.numberOfSteps; ++step)
+    for (int step = 0; step < numSteps; ++step)
     {
-        integrateVerletOne(sys, params);
-        if (checkIfNeighborsNeedUpdate(sys, 0.25 * skinRadius * skinRadius))
+        verletIntegrationPosition(sys);
+        if (checkIfNeighborsNeedUpdate(sys))
             updateNeighbors(sys);
         computeForce(sys);
-        integrateVerletTwo(sys, params);
+        verletIntegrationVelocity(sys);
 
         if (step % 100 == 0)
         {
-            // saveXyz(sys);
+            // saveXyz(sys, "out.xyz");
             const double pe = sys.potentialEnergy;
             const double ke = getKineticEnergy(sys);
-            const double T = ke / (3.0 / 2.0 * K_B * sys.numberOfAtoms);
 
-            double averageNeighbors = 0.0;
-            for (int count : sys.neighborCount)
-                averageNeighbors += (double)(count);
-            averageNeighbors /= sys.numberOfAtoms;
+            double averageNeighbors = 0;
+            for (auto neighbor : sys.neighbors)
+                averageNeighbors += (double)(neighbor.numNeighborsPerAtom);
+            averageNeighbors /= sys.numAtoms;
 
             std::cout << step << " "
-                      << T << " "
+                      << getTemperature(sys) << " "
                       << ke << " "
                       << pe << " "
                       << ke + pe << " "
-                      << sys.cellUpdates << " "
+                      << sys.numUpdates << " "
                       << averageNeighbors << " "
                       << std::endl;
         }
@@ -153,16 +147,16 @@ void computeForce(System &sys)
     const double e4s6 = 4.0 * epsilon * sigma6;
     const double e4s12 = 4.0 * epsilon * sigma12;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].force[d] = 0.0;
     sys.potentialEnergy = 0.0;
 
-    for (int ni = 0; ni < sys.numberOfAtoms; ni++)
+    for (int ni = 0; ni < sys.numAtoms; ni++)
     {
-        for (int j = 0; j < sys.neighborCount[ni]; j++)
+        for (int j = 0; j < sys.neighbors[ni].numNeighborsPerAtom; j++)
         {
-            const int nj = sys.neighborIndex[ni * atomMaxNeighbors + j];
+            const int nj = sys.neighbors[ni].neighborIndex[j];
 
             if (ni < nj)
             {
@@ -204,7 +198,9 @@ void updateNeighborList(System &sys)
     const int *nc = sys.cellSizes;
     const double neighborCutoff = cutoffRadius + skinRadius;
     const double squaredNeighborCutoff = neighborCutoff * neighborCutoff;
-    std::fill(sys.neighborCount.begin(), sys.neighborCount.end(), 0);
+
+    for (auto &neighbor : sys.neighbors)
+        neighbor.numNeighborsPerAtom = 0;
 
     // Iterate over cells
     for (ic[0] = 0; ic[0] < nc[0]; ic[0]++)
@@ -214,7 +210,7 @@ void updateNeighborList(System &sys)
                 // Iterate over atoms in cell ic
                 const auto &cell_ic = sys.grid[INDEX(ic, sys.cellSizes)];
 
-                for (int i = 0; i < cell_ic.numberOfAtomsPerCell; ++i)
+                for (int i = 0; i < cell_ic.numAtomsPerCell; ++i)
                 {
                     ni = cell_ic.atomIndex[i];
                     const auto &atom_ni = sys.atoms[ni];
@@ -243,7 +239,7 @@ void updateNeighborList(System &sys)
 
                                 // Iterate over all atoms in cell jc
                                 const auto &cell_jc = sys.grid[INDEX(jc, sys.cellSizes)];
-                                for (int j = 0; j < cell_jc.numberOfAtomsPerCell; ++j)
+                                for (int j = 0; j < cell_jc.numAtomsPerCell; ++j)
                                 {
                                     nj = cell_jc.atomIndex[j];
 
@@ -260,10 +256,10 @@ void updateNeighborList(System &sys)
                                         }
                                         if (r2 < squaredNeighborCutoff)
                                         {
-                                            sys.neighborIndex[ni * atomMaxNeighbors + sys.neighborCount[ni]++] = nj;
-                                            sys.neighborIndex[nj * atomMaxNeighbors + sys.neighborCount[nj]++] = ni;
+                                            sys.neighbors[ni].neighborIndex[sys.neighbors[ni].numNeighborsPerAtom++] = nj;
+                                            sys.neighbors[nj].neighborIndex[sys.neighbors[nj].numNeighborsPerAtom++] = ni;
 
-                                            if ((sys.neighborCount[ni] > atomMaxNeighbors) || (sys.neighborCount[nj] > atomMaxNeighbors))
+                                            if ((sys.neighbors[ni].numNeighborsPerAtom > maxNeighbors) || (sys.neighbors[nj].numNeighborsPerAtom > maxNeighbors))
                                             {
                                                 std::cout << "Error: max number of neighbors exceeds!" << std::endl;
                                                 exit(1);
@@ -286,20 +282,20 @@ void updateCellList(System &sys)
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
 
     for (auto &cell : sys.grid)
-        cell.numberOfAtomsPerCell = 0;
+        cell.numAtomsPerCell = 0;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         for (int d = 0; d < 3; ++d)
             ic[d] = (int)(sys.atoms[n].position[d] * sys.cellSizes[d] / l[d]);
 
         auto &cell = sys.grid[INDEX(ic, sys.cellSizes)];
-        if (cell.numberOfAtomsPerCell > sys.cellMaxAtoms)
+        if (cell.numAtomsPerCell > sys.cellMaxAtoms)
         {
             std::cerr << "Max number of atoms per cell exceeded: " << sys.cellMaxAtoms << std::endl;
             exit(1);
         }
-        cell.atomIndex[cell.numberOfAtomsPerCell++] = n;
+        cell.atomIndex[cell.numAtomsPerCell++] = n;
     }
 }
 
@@ -309,55 +305,54 @@ void updateNeighbors(System &sys)
     updateNeighborList(sys);
 
     // Update cells
-    sys.cellUpdates += 1;
+    sys.numUpdates += 1;
 }
 
-void integrateVerletOne(System &sys, const Parameters &params)
+void verletIntegrationPosition(System &sys)
 {
     double pos;
-
     const double l[3] = {sys.box[0], sys.box[4], sys.box[8]};
-    const double dt = params.timeStep;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         auto &atom = sys.atoms[n];
 
         for (int d = 0; d < 3; ++d)
         {
-            pos = atom.position[d] + dt * (atom.velocity[d] + dt * 0.5 / atom.mass * atom.force[d]);
+            pos = atom.position[d] + timeStep * (atom.velocity[d] + timeStep * 0.5 / atom.mass * atom.force[d]);
             if ((pos < 0.) || (pos >= l[d]))
                 pos = fmod(pos + 100. * l[d], l[d]);
 
             atom.position[d] = pos;
-            atom.velocity[d] += dt * 0.5 / atom.mass * atom.force[d];
+            atom.velocity[d] += timeStep * 0.5 / atom.mass * atom.force[d];
         }
     }
 }
 
-void integrateVerletTwo(System &sys, const Parameters &params)
+void verletIntegrationVelocity(System &sys)
 {
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         auto &atom = sys.atoms[n];
 
         for (int d = 0; d < 3; ++d)
-            atom.velocity[d] += params.timeStep * 0.5 / atom.mass * atom.force[d];
+            atom.velocity[d] += timeStep * 0.5 / atom.mass * atom.force[d];
     }
 }
 
 void updatePositionOld(System &sys)
 {
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].positionOld[d] = sys.atoms[n].position[d];
 }
 
-bool checkIfNeighborsNeedUpdate(const System &sys, double threshold)
+bool checkIfNeighborsNeedUpdate(const System &sys)
 {
     bool needUpdate = false;
+    const double threshold = 0.25 * skinRadius * skinRadius;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         double r2 = 0.0;
         for (int d = 0; d < 3; ++d)
@@ -429,11 +424,11 @@ void readXyz(System &sys, const std::string &filename)
         std::cerr << "The first line of xyz.in should have one item." << std::endl;
         exit(1);
     }
-    sys.numberOfAtoms = getInt(tokens[0]);
-    std::cout << "Number of atoms = " << sys.numberOfAtoms << std::endl;
+    sys.numAtoms = getInt(tokens[0]);
+    std::cout << "Number of atoms = " << sys.numAtoms << std::endl;
 
     // allocate memory
-    sys.atoms.resize(sys.numberOfAtoms);
+    sys.atoms.resize(sys.numAtoms);
 
     // line 2
     tokens = getTokens(input);
@@ -455,7 +450,7 @@ void readXyz(System &sys, const std::string &filename)
     }
 
     // starting from line 3
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         tokens = getTokens(input);
         if (tokens.size() < 5)
@@ -467,73 +462,24 @@ void readXyz(System &sys, const std::string &filename)
         }
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].position[d] = getDouble(tokens[d + 1]);
+
         sys.atoms[n].mass = getDouble(tokens[4]);
     }
 
     input.close();
 }
 
-void readRun(Parameters &params, const std::string &filename)
+inline double getTemperature(const System &sys)
 {
-    std::ifstream input(filename);
-    if (!input.is_open())
-    {
-        std::cerr << "Failed to open run.in." << std::endl;
-        exit(1);
-    }
-
-    while (input.peek() != EOF)
-    {
-        std::vector<std::string> tokens = getTokens(input);
-
-        if (tokens.size() > 0)
-        {
-            if (tokens[0] == "time_step")
-            {
-                params.timeStep = getDouble(tokens[1]);
-                if (params.timeStep < 0)
-                {
-                    std::cout << "timeStep should >= 0." << std::endl;
-                    exit(1);
-                }
-                std::cout << "timeStep = " << params.timeStep << " fs." << std::endl;
-                params.timeStep /= TIME_UNIT_CONVERSION; // from fs to natural unit
-            }
-            else if (tokens[0] == "run")
-            {
-                params.numberOfSteps = getInt(tokens[1]);
-                if (params.numberOfSteps < 1)
-                {
-                    std::cout << "numberOfSteps should >= 1." << std::endl;
-                    exit(1);
-                }
-                std::cout << "numberOfSteps = " << params.numberOfSteps << std::endl;
-            }
-            else if (tokens[0] == "temperature")
-            {
-                params.temperature = getDouble(tokens[1]);
-                if (params.temperature < 0)
-                {
-                    std::cout << "temperature >= 0." << std::endl;
-                    exit(1);
-                }
-                std::cout << "temperature = " << params.temperature << " K." << std::endl;
-            }
-        }
-        else if (tokens[0][0] != '#')
-        {
-            std::cout << tokens[0] << " is not a valid keyword." << std::endl;
-            exit(1);
-        }
-    }
+    return getKineticEnergy(sys) / (3.0 / 2.0 * K_B * sys.numAtoms);
 }
 
-double getKineticEnergy(const System &sys)
+inline double getKineticEnergy(const System &sys)
 {
     double v2;
     double kineticEnergy = 0.0;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         v2 = 0.0;
         for (int d = 0; d < 3; ++d)
@@ -546,10 +492,10 @@ double getKineticEnergy(const System &sys)
 void scaleVelocity(System &sys, const double T0)
 {
     const double temperature =
-        getKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numberOfAtoms);
+        getKineticEnergy(sys) * 2.0 / (3.0 * K_B * sys.numAtoms);
     double scaleFactor = sqrt(T0 / temperature);
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].velocity[d] *= scaleFactor;
 }
@@ -563,7 +509,7 @@ void initializeVelocity(System &sys, const double T0)
     srand(42);
 #endif
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
     {
         totalMass += sys.atoms[n].mass;
 
@@ -576,7 +522,7 @@ void initializeVelocity(System &sys, const double T0)
     for (int d = 0; d < 3; ++d)
         centerOfMassVelocity[d] /= totalMass;
 
-    for (int n = 0; n < sys.numberOfAtoms; ++n)
+    for (int n = 0; n < sys.numAtoms; ++n)
         for (int d = 0; d < 3; ++d)
             sys.atoms[n].velocity[d] -= centerOfMassVelocity[d];
 
@@ -607,17 +553,18 @@ void initializeNeighbors(System &sys, double cellLength)
 
     const double systemVolume = l[0] * l[1] * l[2];
     const double cellVolume = cellLength * cellLength * cellLength;
-    sys.cellMaxAtoms = 3 * (int)(sys.numberOfAtoms / systemVolume * cellVolume);
+    sys.cellMaxAtoms = 3 * (int)(sys.numAtoms / systemVolume * cellVolume);
     std::cout << "Cell max atoms = " << sys.cellMaxAtoms << std::endl;
 
     for (auto &cell : sys.grid)
         cell.atomIndex.resize(sys.cellMaxAtoms);
 
-    sys.neighborCount.resize(sys.numberOfAtoms);
-    sys.neighborIndex.resize(sys.numberOfAtoms * atomMaxNeighbors);
-    updatePositionOld(sys);
+    sys.neighbors.resize(sys.numAtoms);
+    for (auto &neighbor : sys.neighbors)
+        neighbor.neighborIndex.resize(maxNeighbors);
 
-    sys.cellUpdates = 0;
+    updatePositionOld(sys);
+    sys.numUpdates = 0;
 }
 
 inline void applyPBC(double &r, const double l)
@@ -627,13 +574,13 @@ inline void applyPBC(double &r, const double l)
     else if (r < -l * 0.5)
         r += l;
 }
-void saveXyz(const System &sys)
+void saveXyz(const System &sys, const std::string &filename)
 {
-    std::ofstream file("out.xyz", std::ios::app);
+    std::ofstream file(filename, std::ios::app);
     if (!file)
         return;
 
-    file << sys.numberOfAtoms << "\n";
+    file << sys.numAtoms << "\n";
     file << "XYZ configuration\n";
     for (const Atom &atom : sys.atoms)
     {

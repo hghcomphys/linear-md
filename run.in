@@ -1,3 +1,0 @@
-temperature 60     # temperature in units of K
-time_step 0.5      # time step in units of fs
-run 1001 
