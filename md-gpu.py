@@ -1,8 +1,12 @@
+import os
+
+os.environ["NUMBA_ENABLE_CUDASIM"] = "1"
+
 import math
 from typing import NamedTuple, TextIO
 
 import numpy as np
-from numba import njit
+from numba import cuda
 from numpy.typing import NDArray
 
 FLOAT = np.float64
@@ -16,9 +20,7 @@ class SimulationParameters(NamedTuple):
     box_length: float
     atom_spacing: float
     max_velocity: float
-    cutoff_radius: float = 15.0
-    cell_max_atoms: int = 100
-    neighbor_max_atoms: int = 50
+    cutoff: float
 
 
 num_atoms = 4000
@@ -29,6 +31,7 @@ params = SimulationParameters(
     box_length=math.sqrt(num_atoms) * atom_spacing,
     atom_spacing=atom_spacing,
     max_velocity=10.0,
+    cutoff=15.0,
 )
 
 
@@ -39,28 +42,31 @@ class Particles(NamedTuple):
 
 
 class CellList(NamedTuple):
+    max_num_atoms: int
     num_atoms_per_cell: NDArray
     atom_index: NDArray
     sizes: tuple[int, int]
 
 
 class NeighborList(NamedTuple):
-    num_neighbors_per_atom: NDArray
-    neighbor_index: NDArray
+    max_num_neighbors: int
+    num_neighbors_per_atom: Array
+    neighbor_index: Array
 
 
 def initialize_position(
     params: SimulationParameters,
 ) -> Array:
     atom_spacing = params.atom_spacing
+    box_length = params.box_length
     num_atoms_per_row = math.ceil(math.sqrt(params.num_atoms))
     position = np.empty(shape=(params.num_atoms, 2), dtype=FLOAT)
     atom_index = 0
     for index_j in range(num_atoms_per_row):
         for index_i in range(num_atoms_per_row):
             if atom_index < position.shape[0]:
-                position[atom_index, 0] = (index_i + 0.5) * atom_spacing
-                position[atom_index, 1] = (index_j + 0.5) * atom_spacing
+                position[atom_index, 0] = (index_i + 0.5) * atom_spacing % box_length
+                position[atom_index, 1] = (index_j + 0.5) * atom_spacing % box_length
             atom_index += 1
     return position
 
@@ -76,186 +82,136 @@ def initialize_velocity(
     return velocity
 
 
-position = initialize_position(params)
-velocity = initialize_velocity(params)
-force = np.empty((num_atoms, 2), dtype=FLOAT, order=ORDER)
+position = initialize_position(params)  # .ravel(order)
+velocity = initialize_velocity(params)  # .ravel(order)
+position_d = cuda.device_array(position.shape, dtype=FLOAT, order=ORDER)
+velocity_d = cuda.device_array(velocity.shape, dtype=FLOAT, order=ORDER)
+force_d = cuda.device_array((num_atoms, 2), dtype=FLOAT, order=ORDER)
+cuda.to_device(position, to=position_d)
+cuda.to_device(velocity, to=velocity_d)
 particles = Particles(
-    position.astype(FLOAT, order=ORDER),
-    velocity.astype(FLOAT, order=ORDER),
-    force,
+    position_d,
+    velocity_d,
+    force_d,
 )
+print("Number of atoms:", len(position))
 
 
 def initialize_neighbors(
     params: SimulationParameters,
 ) -> tuple[CellList, NeighborList]:
     cell_sizes = (
-        math.floor(params.box_length / params.cutoff_radius),
-        math.floor(params.box_length / params.cutoff_radius),
+        math.floor(params.box_length / params.cutoff),
+        math.floor(params.box_length / params.cutoff),
     )
-    for size in cell_sizes:
-        assert size > 2, print(f"{cell_sizes=}")
-    cell_atom_index = np.empty(
-        shape=(math.prod(cell_sizes), params.cell_max_atoms),
+    cell_max_atoms = 100
+    cell_atom_index = cuda.device_array(
+        math.prod(cell_sizes) * cell_max_atoms,
         dtype=np.int32,
     )
-    cell_num_atoms = np.empty(
+    cell_num_atoms = cuda.device_array(
         math.prod(cell_sizes),
         dtype=np.int32,
     )
     cell_list = CellList(
+        max_num_atoms=cell_max_atoms,
         num_atoms_per_cell=cell_num_atoms,
         atom_index=cell_atom_index,
         sizes=cell_sizes,
     )
 
-    neighbor_index = np.empty(
-        shape=(params.num_atoms, params.neighbor_max_atoms),
+    neighbor_max = 100
+    neighbor_index = cuda.device_array(
+        params.num_atoms * neighbor_max,
         dtype=np.int32,
     )
-    neighbor_num_atoms = np.empty(
+    neighbor_num_atoms = cuda.device_array(
         params.num_atoms,
         dtype=np.int32,
     )
     neighbor_list = NeighborList(
+        max_num_neighbors=neighbor_max,
         neighbor_index=neighbor_index,
         num_neighbors_per_atom=neighbor_num_atoms,
     )
-
-    return (
-        cell_list,
-        neighbor_list,
-    )
+    return cell_list, neighbor_list
 
 
-cells, neighbors = initialize_neighbors(params)
-# print(cells)
+cell_list, neighbor_list = initialize_neighbors(params)
+# print(cell_list)
 
 
-@njit
-def index(ic: tuple[int, int], nc: tuple[int, int]) -> int:
+@cuda.jit
+def clear_grid(cell_list: CellList) -> None:
+    start, stride = cuda.grid(1), cuda.gridsize(1)
+    for index in range(start, math.prod(cell_list.sizes), stride):
+        cell_list.num_atoms_per_cell[index] = 0
+
+
+@cuda.jit(device=True, inline=True)
+def index3d(ic: tuple[int, int, int], nc: tuple[int, int]) -> int:
+    return ic[0] + nc[0] * (ic[1] + nc[1] * ic[2])
+
+
+@cuda.jit(device=True, inline=True)
+def index2d(ic: tuple[int, int], nc: tuple[int, int]) -> int:
     return ic[0] + nc[0] * ic[1]
 
 
-@njit
-def apply_pbc(
-    rij: FLOAT,
-    box_length: FLOAT,
-) -> FLOAT:
-    L = box_length
-    if rij >= 0.5 * L:
-        rij -= L
-    elif rij <= -0.5 * L:
-        rij += L
-    return rij
-
-
-@njit
+@cuda.jit
 def update_grid(
     particles: Particles,
     params: SimulationParameters,
-    cells: CellList,
-    neighbors: NeighborList,
+    cell_list: CellList,
 ) -> None:
 
-    for i in range(params.cell_max_atoms):
-        cells.num_atoms_per_cell[i] = 0
-    for i in range(params.num_atoms):
-        neighbors.num_neighbors_per_atom[i] = 0
+    start, stride = cuda.grid(1), cuda.gridsize(1)
+    for index_i in range(start, params.num_atoms, stride):
 
-    length = params.box_length
-    for index_i in range(0, params.num_atoms):
-        nc = cells.sizes
+        nc = cell_list.sizes
+        length = params.box_length
         ic1 = math.floor(particles.position[index_i, 0] * nc[0] / length)
         ic2 = math.floor(particles.position[index_i, 1] * nc[1] / length)
 
         # must be an atomic add!
         ic = ic1, ic2
-        idx = index(ic, nc)
+        idx2d = index2d(ic, nc)
+        idx3d = index3d((*ic, cell_list.num_atoms_per_cell[idx2d]), nc)
 
-        cells.atom_index[idx, cells.num_atoms_per_cell[idx]] = index_i
-        cells.num_atoms_per_cell[idx] += 1
-
-    for n in range(params.num_atoms):
-        neighbors.num_neighbors_per_atom[n] = 0
-
-    for ic1 in range(0, nc[0]):
-        for ic2 in range(0, nc[1]):
-
-            idx_i = index((ic1, ic2), nc)
-            for i in range(cells.num_atoms_per_cell[idx_i]):
-                ni = cells.atom_index[idx_i, i]
-
-                for kc1 in range(ic1 - 1, ic1 + 2):
-                    if (kc1 == -1) or (kc1 == nc[0]):
-                        jc1 = (kc1 + nc[0]) % nc[0]
-                    else:
-                        jc1 = kc1
-
-                        for kc2 in range(ic2 - 1, ic2 + 2):
-                            if (kc2 == -1) or (kc2 == nc[1]):
-                                jc2 = (kc2 + nc[1]) % nc[1]
-                            else:
-                                jc2 = kc2
-
-                            idx_j = index((jc1, jc2), nc)
-                            for j in range(cells.num_atoms_per_cell[idx_j]):
-                                nj = cells.atom_index[idx_j, j]
-
-                            if ni < nj:
-                                dx = (
-                                    particles.position[nj, 0]
-                                    - particles.position[ni, 0]
-                                )
-                                dx = apply_pbc(dx, length)
-                                dy = (
-                                    particles.position[nj, 1]
-                                    - particles.position[ni, 1]
-                                )
-                                dy = apply_pbc(dy, length)
-                                r2 = dx * dx + dy * dy
-
-                                if r2 < params.cutoff_radius * params.cutoff_radius:
-                                    neighbors.neighbor_index[
-                                        ni, neighbors.num_neighbors_per_atom[ni]
-                                    ] = ni
-                                    neighbors.num_neighbors_per_atom[ni] += 1
-
-                                    neighbors.neighbor_index[
-                                        nj, neighbors.num_neighbors_per_atom[nj]
-                                    ] = nj
-                                    neighbors.num_neighbors_per_atom[nj] += 1
+        cell_list.atom_index[idx3d] = index_i
+        cuda.atomic.add(cell_list.num_atoms_per_cell, idx2d, 1)
 
 
-update_grid(particles, params, cells, neighbors)
-# print(cells.atom_index)
-# print(neighbors.neighbor_index)
+threads_per_block = 32
+blocks_per_grid = math.ceil(math.prod(cell_list.sizes) / threads_per_block)
+clear_grid[blocks_per_grid, threads_per_block](cell_list)
+blocks_per_grid = math.ceil(params.num_atoms / threads_per_block)
+update_grid[blocks_per_grid, threads_per_block](particles, params, cell_list)
+cuda.synchronize()
+print(cell_list.num_atoms_per_cell.copy_to_host())
+# print(cell_list.atom_index.copy_to_host())
 
 
-@njit
+@cuda.jit
 def compute_force(
     particles: Particles,
     params: SimulationParameters,
-    neighbors: NeighborList,
 ) -> None:
-    length = params.box_length
-    force = np.empty(shape=(2,), dtype=FLOAT)
-
-    for index_i in range(0, params.num_atoms):
+    force = cuda.local.array(shape=(2,), dtype=FLOAT)
+    start, stride = cuda.grid(1), cuda.gridsize(1)
+    for index_i in range(start, params.num_atoms, stride):
         ri = particles.position[index_i]
         fi = particles.force[index_i]
-
         # calculate per atom force
         force[0], force[1] = 0.0, 0.0
-        for j in range(neighbors.num_neighbors_per_atom[index_i]):
-            index_j = neighbors.neighbor_index[index_i, j]
+        for index_j in range(params.num_atoms):
             if index_i != index_j:
                 rj = particles.position[index_j]
-                pair_interaction(ri, rj, length, force)
+                pair_interaction(ri, rj, params.box_length, force)
         fi[0], fi[1] = force[0], force[1]
 
 
-@njit
+@cuda.jit(device=True)
 def pair_interaction(
     position_i: Array,
     position_j: Array,
@@ -272,16 +228,30 @@ def pair_interaction(
     force[1] += rij_y * r2i * coef
 
 
-@njit
+@cuda.jit(device=True, inline=True)
+def apply_pbc(
+    rij: FLOAT,
+    box_length: FLOAT,
+) -> FLOAT:
+    L = box_length
+    if rij >= 0.5 * L:
+        rij -= L
+    elif rij <= -0.5 * L:
+        rij += L
+    return rij
+
+
+@cuda.jit
 def verlet_integration_position(
     particles: Particles,
     params: SimulationParameters,
 ) -> None:
     r, v, f = particles
     dt, L = params.time_step, params.box_length
-    for index in range(0, params.num_atoms):
+    start, stride = cuda.grid(1), cuda.gridsize(1)
+    for index in range(start, params.num_atoms, stride):
         for dim in range(2):
-            r[index, dim] = np.fmod(
+            r[index, dim] = math.fmod(
                 r[index, dim]
                 + dt * (v[index, dim] + 0.5 * dt * f[index, dim])
                 + 10.0 * L,
@@ -290,14 +260,15 @@ def verlet_integration_position(
             v[index, dim] += 0.5 * dt * f[index, dim]
 
 
-@njit
+@cuda.jit
 def verlet_integration_velocity(
     particles: Particles,
     params: SimulationParameters,
 ) -> None:
     v, f = particles.velocity, particles.force
     dt = params.time_step
-    for index in range(0, params.num_atoms):
+    start, stride = cuda.grid(1), cuda.gridsize(1)
+    for index in range(start, params.num_atoms, stride):
         for dim in range(2):
             v[index, dim] += 0.5 * dt * f[index, dim]
 
@@ -326,7 +297,11 @@ def simulate(
     print(f"Number of atoms: {params.num_atoms}")
     print("Step    Time         Temperature")
     print("--------------------------------")
-    compute_force(particles, params, neighbors)
+    threads_per_block = 32
+    blocks_per_grid = math.ceil(params.num_atoms / threads_per_block)
+    compute_force[blocks_per_grid, threads_per_block](
+        particles, params
+    )  # initialize force
     with open(filename, "w") as file:
         # Simulate
         for step in range(steps):
@@ -338,10 +313,14 @@ def simulate(
                 )
                 # save(particles.position.copy_to_host(), file)
             # Next time step (update r, v, and F)
-            verlet_integration_position(particles, params)
-            compute_force(particles, params, neighbors)
-            verlet_integration_velocity(particles, params)
+            verlet_integration_position[blocks_per_grid, threads_per_block](
+                particles, params
+            )
+            compute_force[blocks_per_grid, threads_per_block](particles, params)
+            verlet_integration_velocity[blocks_per_grid, threads_per_block](
+                particles, params
+            )
     print("Done.")
 
 
-simulate(params, particles, steps=1000)
+# simulate(params, particles, steps=1000)
