@@ -360,9 +360,12 @@ bool checkIfNeighborsNeedUpdate(const System &sys)
 
     for (int n = 0; n < sys.numAtoms; ++n)
     {
-        double r2 = 0.0;
+        double dx, r2 = 0.0;
         for (int d = 0; d < 3; ++d)
-            r2 += sys.atoms[n].position[d] - sys.atoms[n].positionOld[d];
+        {
+            dx = sys.atoms[n].position[d] - sys.atoms[n].positionOld[d];
+            r2 += dx * dx;
+        }
         if (r2 > threshold)
         {
             needUpdate = true;

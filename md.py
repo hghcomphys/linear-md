@@ -1,6 +1,7 @@
 import math
 from typing import NamedTuple, TextIO
 
+from numba.np.ufunc.parallel import ParallelGUFuncBuilder
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
@@ -29,6 +30,7 @@ class Particles(NamedTuple):
     velocity: Array
     force: Array
     box: Array
+    position_old: Array
 
 
 class CellList(NamedTuple):
@@ -166,55 +168,68 @@ def update_grid(
                             jc0 = (kc0 + nc[0]) % nc[0]
                         else:
                             jc0 = kc0
-                            for kc1 in range(ic1 - 1, ic1 + 2):
-                                if (kc1 == -1) or (kc1 == nc[1]):
-                                    jc1 = (kc1 + nc[1]) % nc[1]
+
+                        for kc1 in range(ic1 - 1, ic1 + 2):
+                            if (kc1 == -1) or (kc1 == nc[1]):
+                                jc1 = (kc1 + nc[1]) % nc[1]
+                            else:
+                                jc1 = kc1
+
+                            for kc2 in range(ic2 - 1, ic2 + 2):
+                                if (kc2 == -1) or (kc2 == nc[2]):
+                                    jc2 = (kc2 + nc[2]) % nc[2]
                                 else:
-                                    jc1 = kc1
-                                    for kc2 in range(ic2 - 1, ic2 + 2):
-                                        if (kc2 == -1) or (kc2 == nc[2]):
-                                            jc2 = (kc2 + nc[2]) % nc[2]
-                                        else:
-                                            jc2 = kc2
+                                    jc2 = kc2
 
-                                        idx_j = index3d((jc0, jc1, jc2), nc)
-                                        for j in range(cells.num_atoms_per_cell[idx_j]):
-                                            nj = cells.atom_index[idx_j, j]
+                                idx_j = index3d((jc0, jc1, jc2), nc)
+                                for j in range(cells.num_atoms_per_cell[idx_j]):
+                                    nj = cells.atom_index[idx_j, j]
 
-                                            if ni < nj:
-                                                dx = apply_pbc(
-                                                    position[nj, 0] - position[ni, 0],
-                                                    length[0],
-                                                )
-                                                dy = apply_pbc(
-                                                    position[nj, 1] - position[ni, 1],
-                                                    length[1],
-                                                )
-                                                dz = apply_pbc(
-                                                    position[nj, 2] - position[ni, 2],
-                                                    length[2],
-                                                )
-                                                r2 = dx * dx + dy * dy + dz * dz
+                                    if ni < nj:
+                                        dx = apply_pbc(
+                                            position[nj, 0] - position[ni, 0],
+                                            length[0],
+                                        )
+                                        dy = apply_pbc(
+                                            position[nj, 1] - position[ni, 1],
+                                            length[1],
+                                        )
+                                        dz = apply_pbc(
+                                            position[nj, 2] - position[ni, 2],
+                                            length[2],
+                                        )
+                                        r2 = dx * dx + dy * dy + dz * dz
 
-                                                if r2 < neighbor_cutoff2:
-                                                    neighbors.neighbor_index[
-                                                        ni,
-                                                        neighbors.num_neighbors_per_atom[
-                                                            ni
-                                                        ],
-                                                    ] = nj
-                                                    neighbors.num_neighbors_per_atom[
-                                                        ni
-                                                    ] += 1
-                                                    neighbors.neighbor_index[
-                                                        nj,
-                                                        neighbors.num_neighbors_per_atom[
-                                                            nj
-                                                        ],
-                                                    ] = ni
-                                                    neighbors.num_neighbors_per_atom[
-                                                        nj
-                                                    ] += 1
+                                        if r2 < neighbor_cutoff2:
+                                            neighbors.neighbor_index[
+                                                ni,
+                                                neighbors.num_neighbors_per_atom[ni],
+                                            ] = nj
+                                            neighbors.num_neighbors_per_atom[ni] += 1
+                                            neighbors.neighbor_index[
+                                                nj,
+                                                neighbors.num_neighbors_per_atom[nj],
+                                            ] = ni
+                                            neighbors.num_neighbors_per_atom[nj] += 1
+
+    # Update old position
+    for n in range(params.num_atoms):
+        particles.position_old[n, 0] = position[n, 0]
+        particles.position_old[n, 1] = position[n, 1]
+        particles.position_old[n, 2] = position[n, 2]
+
+
+@njit
+def check_if_neighbor_need_update(particles: Particles, params: SimulationParameters):
+    displacement_cutoff2 = 0.25 * params.skin_radius * params.skin_radius
+    r2 = FLOAT(0.0)
+    for n in range(params.num_atoms):
+        for dim in range(3):
+            dx = particles.position[n, dim] - particles.position_old[n, dim]
+            r2 += dx * dx
+        if r2 > displacement_cutoff2:
+            return True
+    return False
 
 
 @njit
@@ -250,7 +265,7 @@ def compute_force(
     for ni in range(params.num_atoms):
         for j in range(neighbors.num_neighbors_per_atom[ni]):
             nj = neighbors.neighbor_index[ni, j]
-        # for nj in range(params.num_atoms):
+            # for nj in range(params.num_atoms):
 
             if ni < nj:
                 dx = apply_pbc(position[nj, 0] - position[ni, 0], length[0])
@@ -281,7 +296,7 @@ def verlet_integration_position(
     params: SimulationParameters,
 ) -> None:
     dt = params.time_step
-    m, r, v, f, box = particles
+    m, r, v, f, box, _ = particles
     length = box[0], box[4], box[8]
     for n in range(params.num_atoms):
         for dim in range(3):
@@ -340,8 +355,8 @@ def simulate(
 ) -> None:
     cells, neighbors = initialize_neighbors(params, box)
     update_grid(particles, params, cells, neighbors)
-    print(neighbors.num_neighbors_per_atom)
-    print(neighbors.neighbor_index)
+    # print(neighbors.num_neighbors_per_atom)
+    # print(neighbors.neighbor_index)
 
     potential_energy = np.empty(1, dtype=FLOAT)
     compute_force(particles, params, neighbors, potential_energy)
@@ -353,9 +368,11 @@ def simulate(
             f" {'KinE':10}"
             f" {'PotE':10}"
             f" {'TotE':10}"
+            f" {'Update':10}"
             f" {'AvgNb':10}"
             f" {'AvgCell':10}"
         )
+        num_neighbor_udpates = 1
         for step in range(steps):
             if step % log_frequency == 0:
                 ke = get_kinetic_energy(particles)
@@ -367,14 +384,16 @@ def simulate(
                     f" {ke:<10.4f}"
                     f" {pe:<10.4f}"
                     f" {ke + pe:<10.4f}"
+                    f" {num_neighbor_udpates:<10}"
                     f" {neighbors.num_neighbors_per_atom.mean():<10.2f}"
                     f" {cells.num_atoms_per_cell.mean():<10.2f}"
                 )
                 # save(particles.position, file)
             # Next time step (update r, v, and F)
             verlet_integration_position(particles, params)
-            if step % 10 == 0:
+            if check_if_neighbor_need_update(particles, params):
                 update_grid(particles, params, cells, neighbors)
+                num_neighbor_udpates += 1
             compute_force(particles, params, neighbors, potential_energy)
             verlet_integration_velocity(particles, params)
 
@@ -420,6 +439,7 @@ if __name__ == "__main__":
         velocity=velocity,
         force=force,
         box=box,
+        position_old=position.copy(),
     )
     print(f"Number of atoms: {params.num_atoms}")
     print(f"Box matrix H:\n{particles.box.reshape(3, 3)}")
