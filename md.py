@@ -9,7 +9,7 @@ FLOAT = np.float64
 Array = NDArray[FLOAT]
 ORDER = "C"
 
-K_B = 8.617343e-5                  # Boltzmann's constant in natural unit
+K_B = 8.617343e-5  # Boltzmann's constant in natural unit
 TIME_UNIT_CONVERSION = 1.018051e1  # from natural unit to fs
 
 
@@ -18,6 +18,7 @@ class SimulationParameters(NamedTuple):
     time_step: float
     temperature: float
     cutoff_radius: float
+    skin_radius: float
     cell_max_atoms: int
     neighbor_max_atoms: int
 
@@ -63,9 +64,9 @@ def initialize_neighbors(
     cell_length = params.cutoff_radius
     length = box[0], box[4], box[8]
     cell_sizes = (
-        math.floor(length[0] / cell_length),
-        math.floor(length[1] / cell_length),
-        math.floor(length[2] / cell_length),
+        int(length[0] / cell_length),
+        int(length[1] / cell_length),
+        int(length[2] / cell_length),
     )
     for size in cell_sizes:
         assert size > 2, print(f"{cell_sizes=}")
@@ -129,24 +130,26 @@ def update_grid(
     cells: CellList,
     neighbors: NeighborList,
 ) -> None:
-    cutoff2 = params.cutoff_radius * params.cutoff_radius
+    neighbor_cutoff2 = (params.cutoff_radius + params.skin_radius) ** 2
     box, position = particles.box, particles.position
     length = box[0], box[4], box[8]
     nc = cells.sizes
 
+    # Cell list
     for ic0 in range(nc[0]):
         for ic1 in range(nc[1]):
             for ic2 in range(nc[2]):
                 cells.num_atoms_per_cell[index3d((ic0, ic1, ic2), nc)] = 0
 
-    for ni in range(0, params.num_atoms):
-        ic0 = math.floor(position[ni, 0] * nc[0] / length[0])
-        ic1 = math.floor(position[ni, 1] * nc[1] / length[1])
-        ic2 = math.floor(position[ni, 2] * nc[2] / length[2])
+    for n in range(params.num_atoms):
+        ic0 = math.floor(position[n, 0] * nc[0] / length[0])
+        ic1 = math.floor(position[n, 1] * nc[1] / length[1])
+        ic2 = math.floor(position[n, 2] * nc[2] / length[2])
         idx = index3d((ic0, ic1, ic2), nc)
-        cells.atom_index[idx, cells.num_atoms_per_cell[idx]] = ni
+        cells.atom_index[idx, cells.num_atoms_per_cell[idx]] = n
         cells.num_atoms_per_cell[idx] += 1
 
+    # Neighbor list
     for n in range(params.num_atoms):
         neighbors.num_neighbors_per_atom[n] = 0
 
@@ -163,13 +166,11 @@ def update_grid(
                             jc0 = (kc0 + nc[0]) % nc[0]
                         else:
                             jc0 = kc0
-
                             for kc1 in range(ic1 - 1, ic1 + 2):
                                 if (kc1 == -1) or (kc1 == nc[1]):
                                     jc1 = (kc1 + nc[1]) % nc[1]
                                 else:
                                     jc1 = kc1
-
                                     for kc2 in range(ic2 - 1, ic2 + 2):
                                         if (kc2 == -1) or (kc2 == nc[2]):
                                             jc2 = (kc2 + nc[2]) % nc[2]
@@ -195,7 +196,7 @@ def update_grid(
                                                 )
                                                 r2 = dx * dx + dy * dy + dz * dz
 
-                                                if r2 < cutoff2:
+                                                if r2 < neighbor_cutoff2:
                                                     neighbors.neighbor_index[
                                                         ni,
                                                         neighbors.num_neighbors_per_atom[
@@ -222,7 +223,6 @@ def compute_force(
     params: SimulationParameters,
     neighbors: NeighborList,
     potential_energy: Array,
-    cutoff2: float,
 ) -> None:
     epsilon = 1.032e-2
     sigma = 3.405
@@ -239,6 +239,8 @@ def compute_force(
     box = particles.box
     force = particles.force
     position = particles.position
+    cutoff2 = params.cutoff_radius * params.cutoff_radius
+    length = box[0], box[4], box[8]
 
     potential_energy[0] = 0.0
     for ni in range(params.num_atoms):
@@ -246,12 +248,11 @@ def compute_force(
         fi[0] = fi[1] = fi[2] = 0.0
 
     for ni in range(params.num_atoms):
-        # for j in range(neighbors.num_neighbors_per_atom[ni]):
-        #     nj = neighbors.neighbor_index[ni, j]
-        for nj in range(params.num_atoms):
+        for j in range(neighbors.num_neighbors_per_atom[ni]):
+            nj = neighbors.neighbor_index[ni, j]
+        # for nj in range(params.num_atoms):
 
             if ni < nj:
-                length = box[0], box[4], box[8]
                 dx = apply_pbc(position[nj, 0] - position[ni, 0], length[0])
                 dy = apply_pbc(position[nj, 1] - position[ni, 1], length[1])
                 dz = apply_pbc(position[nj, 2] - position[ni, 2], length[2])
@@ -305,10 +306,11 @@ def verlet_integration_velocity(
             v[n, dim] += 0.5 * dt / m[n] * f[n, dim]
 
 
-def save(position: Array, file: TextIO) -> None:
-    num_atoms = position.shape[0]
-    file.write(f"{num_atoms}\n\n")
-    for i in range(num_atoms):
+def save(particles: Particles, file: TextIO) -> None:
+    position = particles.position
+    natoms = position.shape[0]
+    file.write(f"{natoms}\n\n")
+    for i in range(natoms):
         file.write(f"{'Ar'}\t{position[i, 0]} {position[i, 1]} {position[i, 2]}\n")
     file.flush()
 
@@ -336,22 +338,23 @@ def simulate(
     log_frequency: int = 100,
     filename: str = "out.xyz",
 ) -> None:
-    cutoff2 = params.cutoff_radius * params.cutoff_radius
     cells, neighbors = initialize_neighbors(params, box)
     update_grid(particles, params, cells, neighbors)
     print(neighbors.num_neighbors_per_atom)
+    print(neighbors.neighbor_index)
 
     potential_energy = np.empty(1, dtype=FLOAT)
-    compute_force(particles, params, neighbors, potential_energy, cutoff2)
+    compute_force(particles, params, neighbors, potential_energy)
     with open(filename, "w") as file:
         # Simulate
         print(
             f"{'Step':8}"
-            f" {'T':10}"
-            f" {'KE':10}"
-            f" {'PE':10}"
+            f" {'Temp':10}"
+            f" {'KinE':10}"
+            f" {'PotE':10}"
             f" {'TotE':10}"
-            f" {'AvgN':10}"
+            f" {'AvgNb':10}"
+            f" {'AvgCell':10}"
         )
         for step in range(steps):
             if step % log_frequency == 0:
@@ -365,13 +368,14 @@ def simulate(
                     f" {pe:<10.4f}"
                     f" {ke + pe:<10.4f}"
                     f" {neighbors.num_neighbors_per_atom.mean():<10.2f}"
+                    f" {cells.num_atoms_per_cell.mean():<10.2f}"
                 )
                 # save(particles.position, file)
             # Next time step (update r, v, and F)
             verlet_integration_position(particles, params)
             if step % 10 == 0:
                 update_grid(particles, params, cells, neighbors)
-            compute_force(particles, params, neighbors, potential_energy, cutoff2)
+            compute_force(particles, params, neighbors, potential_energy)
             verlet_integration_velocity(particles, params)
 
 
@@ -381,10 +385,8 @@ def read_xyz(filename: str) -> tuple:
             line = f.readline()
             if not line:
                 break
-
             num_atoms = int(line.strip())
             box = [float(b) for b in f.readline().strip().split()]
-
             atoms = []
             for _ in range(num_atoms):
                 parts = f.readline().split()
@@ -403,7 +405,8 @@ if __name__ == "__main__":
         time_step=0.5 / TIME_UNIT_CONVERSION,
         temperature=60.0,
         cutoff_radius=9.0,
-        cell_max_atoms=1000,
+        skin_radius=1.0,
+        cell_max_atoms=100,
         neighbor_max_atoms=500,
     )
     mass = np.array([{"Ar": 40.0}[a[0]] for a in atoms])
