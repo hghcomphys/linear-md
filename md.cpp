@@ -96,7 +96,7 @@ int main()
 
     std::cout
         << "Step Temperature KineticEnergy  PotentialEnergy"
-        << "TotalEnergy NeighborListUpdates AverageNeighbors"
+        << "TotalEnergy NeighborListUpdates AverageNeighbors AverageAtomsPerCell"
         << std::endl;
     for (int step = 0; step < numSteps; ++step)
     {
@@ -112,6 +112,11 @@ int main()
             const double pe = sys.potentialEnergy;
             const double ke = getKineticEnergy(sys);
 
+            double averageAtomsPerCell = 0;
+            for (auto cell : sys.grid)
+             averageAtomsPerCell += (double)(cell.numAtomsPerCell);
+            averageAtomsPerCell /= sys.grid.size();
+
             double averageNeighbors = 0;
             for (auto neighbor : sys.neighbors)
                 averageNeighbors += (double)(neighbor.numNeighborsPerAtom);
@@ -124,6 +129,7 @@ int main()
                       << ke + pe << " "
                       << sys.numUpdates << " "
                       << averageNeighbors << " "
+                      << averageAtomsPerCell << " "
                       << std::endl;
         }
     }
