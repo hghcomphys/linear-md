@@ -1,7 +1,6 @@
 import math
 from typing import NamedTuple, TextIO
 
-from numba.np.ufunc.parallel import ParallelGUFuncBuilder
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
@@ -446,5 +445,5 @@ if __name__ == "__main__":
 
     # print("A Molecular Dynamics Simulations")
     # print("System: Lennard-Jones particles")
-    simulate(params, particles, steps=1001)
+    simulate(params, particles, steps=2001)
     print("Done.")

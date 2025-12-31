@@ -22,7 +22,7 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
-const int numSteps = 1001;
+const int numSteps = 2001;
 const int maxNeighbors = 500;
 const double cutoffRadius = 9.0;
 const double skinRadius = 1.0;
