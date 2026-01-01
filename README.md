@@ -3,10 +3,16 @@
 This repository contains experiments on implementing linear-scaling molecular dynamics (MD) algorithms. 
 The focus is on improving performance by using **cell list** and **neighbor list** methods, which reduce the computational complexity of force calculations from *O(N²)* to approximately *O(N)* for short-range interactions.
 
-The repo includes two implementations:
+<!-- 
+## Results
+The performance evaluation shows that the Python Numba implementation achieves performance comparable to the C++ version, demonstrating that JIT compilation can effectively narrow the gap between high-level and low-level languages for molecular dynamics workloads.
+That said, the C++ implementation remains approximately 1.5× faster than the Python version for a system of 4000 atoms and 1000 time steps. 
 
-* C++ 
-* Python + Numba 
+Profiling indicates that this advantage is primarily due to the lower number of executed instructions in the C++ code path, rather than fundamental differences in memory behavior or CPU efficiency. 
+Despite the higher instruction count in Python, key hardware-level metrics remain remarkably similar between the two implementations. 
+In particular, instructions per cycle (IPC) are comparable (around 1.5×), and cache miss rates fall within the same range (approximately 11–15%). 
+This suggests that both versions exhibit similar data access patterns and cache locality, and that the performance gap is largely attributable to language-level overhead rather than architectural inefficiencies.
+-->
 
 
 ## C++ Implementation
@@ -65,12 +71,16 @@ python md.py
 
 This executes the MD simulation using the Numba-accelerated implementation.
 
+### Performance Profiling
 
-## Results
-The performance evaluation shows that the Python Numba implementation achieves performance comparable to the C++ version, demonstrating that JIT compilation can effectively narrow the gap between high-level and low-level languages for molecular dynamics workloads.
-That said, the C++ implementation remains approximately 1.5× faster than the Python version for a system of 4000 atoms and 1000 time steps. 
+Hardware-level profiling
 
-Profiling indicates that this advantage is primarily due to the lower number of executed instructions in the C++ code path, rather than fundamental differences in memory behavior or CPU efficiency. 
-Despite the higher instruction count in Python, key hardware-level metrics remain remarkably similar between the two implementations. 
-In particular, instructions per cycle (IPC) are comparable (around 1.5×), and cache miss rates fall within the same range (approximately 11–15%). 
-This suggests that both versions exhibit similar data access patterns and cache locality, and that the performance gap is largely attributable to language-level overhead rather than architectural inefficiencies.
+```bash
+perf stat -e cycles,instructions,cache-references,cache-misses python md.py 
+```
+
+Python specific profiling using `scalene`
+
+```bash
+scalene python md.py
+```
