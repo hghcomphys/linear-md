@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <unordered_map>
 #include <vector>
 #include <fstream>
 #include <iostream>
@@ -22,7 +23,7 @@
 #define TIME_UNIT_CONVERSION 1.018051e+1 // from natural unit to fs
 #define INDEX(ic, nc) ((ic)[0] + (nc)[0] * ((ic)[1] + (nc)[1] * (ic)[2]))
 
-const int numSteps = 2001;
+const int numSteps = 1001;
 const int maxNeighbors = 500;
 const double cutoffRadius = 9.0;
 const double skinRadius = 1.0;
@@ -30,7 +31,6 @@ const double timeStep = 0.5 / TIME_UNIT_CONVERSION; // fs
 const double temperature = 60;                      // K
 
 struct System;
-void readXyz(System &sys, const std::string &filename);
 void scaleVelocity(System &sys, const double T0);
 void initializeVelocity(System &sys, const double T0);
 void initializeNeighbors(System &sys, double cellLength);
@@ -40,6 +40,7 @@ void verletIntegrationPosition(System &sys);
 void verletIntegrationVelocity(System &sys);
 void saveXyz(const System &sys);
 void updatePositionOld(System &sys);
+void readXyz(System &sys, const std::string &filename, const std::unordered_map<std::string, double> &atomic_mass);
 bool checkIfNeighborsNeedUpdate(const System &sys);
 double getDouble(std::string &token);
 inline double getKineticEnergy(const System &sys);
@@ -87,17 +88,17 @@ int main()
 {
     System sys;
 
-    readXyz(sys, "Ar.xyz");
+    std::unordered_map<std::string, double> atomic_mass{
+        {"Ar", 40.0},
+    };
+    readXyz(sys, "Ar.xyz", atomic_mass);
     initializeVelocity(sys, temperature);
     initializeNeighbors(sys, cutoffRadius);
 
     updateNeighbors(sys);
     computeForce(sys);
 
-    std::cout
-        << "Step Temperature KineticEnergy  PotentialEnergy"
-        << "TotalEnergy NeighborListUpdates AverageNeighbors AverageAtomsPerCell"
-        << std::endl;
+    std::cout << "Step Temp KinE  PotE TotE UpdateNb AvgNb AvgCell" << std::endl;
     for (int step = 0; step < numSteps; ++step)
     {
         verletIntegrationPosition(sys);
@@ -114,7 +115,7 @@ int main()
 
             double averageAtomsPerCell = 0;
             for (auto cell : sys.grid)
-             averageAtomsPerCell += (double)(cell.numAtomsPerCell);
+                averageAtomsPerCell += (double)(cell.numAtomsPerCell);
             averageAtomsPerCell /= sys.grid.size();
 
             double averageNeighbors = 0;
@@ -417,7 +418,7 @@ int getInt(std::string &token)
     return value;
 }
 
-void readXyz(System &sys, const std::string &filename)
+void readXyz(System &sys, const std::string &filename, const std::unordered_map<std::string, double> &atomic_mass)
 {
     std::ifstream input(filename);
     if (!input.is_open())
@@ -469,10 +470,10 @@ void readXyz(System &sys, const std::string &filename)
                       << std::endl;
             exit(1);
         }
+        sys.atoms[n].mass = atomic_mass.at(tokens[0]);
         for (int d = 0; d < 3; ++d)
-            sys.atoms[n].position[d] = getDouble(tokens[d + 1]);
-
-        sys.atoms[n].mass = getDouble(tokens[4]);
+            sys.atoms[n]
+                .position[d] = getDouble(tokens[d + 1]);
     }
 
     input.close();
