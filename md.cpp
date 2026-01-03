@@ -91,7 +91,7 @@ int main()
     std::unordered_map<std::string, double> atomic_mass{
         {"Ar", 40.0},
     };
-    readXyz(sys, "Ar.xyz", atomic_mass);
+    readXyz(sys, "argon.xyz", atomic_mass);
     initializeVelocity(sys, temperature);
     initializeNeighbors(sys, cutoffRadius);
 
@@ -463,10 +463,10 @@ void readXyz(System &sys, const std::string &filename, const std::unordered_map<
     for (int n = 0; n < sys.numAtoms; ++n)
     {
         tokens = getTokens(input);
-        if (tokens.size() < 5)
+        if (tokens.size() < 4)
         {
             std::cerr << "The 3rd line and later of xyz.in "
-                         "should have 5 items."
+                         "should have 4 items."
                       << std::endl;
             exit(1);
         }

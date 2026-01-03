@@ -414,7 +414,7 @@ def read_xyz(filename: str) -> tuple:
 if __name__ == "__main__":
 
     ATOMIC_MASS = {"Ar": 40.0}
-    atoms, box = read_xyz("Ar.xyz")
+    atoms, box = read_xyz("argon.xyz")
     params = Parameters(
         num_atoms=len(atoms),
         time_step=0.5 / TIME_UNIT_CONVERSION,
