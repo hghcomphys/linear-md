@@ -19,7 +19,6 @@ class Parameters(NamedTuple):
     temperature: float
     cutoff_radius: float
     skin_radius: float
-    cell_max_atoms: int
     neighbor_max_atoms: int
 
 
@@ -50,6 +49,7 @@ def simulate(
     log_frequency: int = 100,
     filename: str = "out.xyz",
 ) -> None:
+    box = particles.box
     cells, neighbors = initialize_neighbors(params, box)
     update_neighbors(particles, params, cells, neighbors)
 
@@ -273,8 +273,13 @@ def initialize_neighbors(
     for size in cell_sizes:
         assert size > 2, print(f"{cell_sizes=}")
     # Cell list
+    system_volume = math.prod(length)
+    cell_volume = cell_length**3
+    cell_max_atoms = 3 * int(params.num_atoms / system_volume * cell_volume)
+    print("Cell max atoms:", cell_max_atoms)
+
     cell_atom_index = np.empty(
-        shape=(math.prod(cell_sizes), params.cell_max_atoms),
+        shape=(math.prod(cell_sizes), cell_max_atoms),
         dtype=np.int32,
     )
     cell_num_atoms = np.empty(
@@ -301,7 +306,7 @@ def initialize_neighbors(
     )
     print(f"Cell length:", params.cutoff_radius)
     print(f"Cell sizes: {cells.sizes}")
-    print(f"Cell max atoms:", cells.atom_index.shape[1])
+
     return (
         cells,
         neighbors,
@@ -411,8 +416,7 @@ def read_xyz(filename: str) -> tuple:
     return atoms, box
 
 
-if __name__ == "__main__":
-
+def main() -> None:
     ATOMIC_MASS = {"Ar": 40.0}
     atoms, box = read_xyz("argon.xyz")
     params = Parameters(
@@ -421,7 +425,6 @@ if __name__ == "__main__":
         temperature=60.0,
         cutoff_radius=9.0,
         skin_radius=1.0,
-        cell_max_atoms=100,
         neighbor_max_atoms=500,
     )
     mass = np.array([ATOMIC_MASS[a[0]] for a in atoms])
@@ -439,6 +442,9 @@ if __name__ == "__main__":
     )
     print(f"Number of atoms: {params.num_atoms}")
     print(f"Box matrix H:\n{particles.box.reshape(3, 3)}")
-
     simulate(params, particles, steps=1001)
     print("Done.")
+
+
+if __name__ == "__main__":
+    main()
