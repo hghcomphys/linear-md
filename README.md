@@ -119,12 +119,14 @@ Using the Python implementation, it is feasible to simulate one million atoms on
 
 ### Results
 
-(Linear) scaling
+Linear scaling *O(N)*
 
-<img src="benchmark/scaling.png" width="400">
+<img src="benchmark/scaling.png" width="600">
 
 Performance comparison
 
-<img src="benchmark/performance.png" width="400">
+<img src="benchmark/performance.png" width="600">
 
 
+For large systems, both implementations use a similar amount of memory.
+But for smaller systems, the Python implementation requires more memory.
