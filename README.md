@@ -6,12 +6,19 @@ These techniques reduce the computational complexity of force calculations from 
 
 Additionally, this project serves as a showcase demonstrating that a Python implementation using the [Numba](https://numba.pydata.org/) compiler provides a powerful alternative to C++ for scientific computing, offering a more efficient and productive development experience without compromising performance.
 
+An example MD system with 4000 Argon atoms.
+
+<img src="benchmark/system.png" width="200">
+
+
 ## Repository Structure
 
 - `md.cpp` — C++ molecular dynamics implementation
 - `md.py` — Python (Numba) implementation
+- `generate_lattice.py` — Creating initial configuration 
 - `run_benchmark.py` — Benchmark driver
-- `benchmark/` — Performance plots and results
+- `pixi.toml & pixi.lock` — Python environment setup 
+- `benchmark/` — Performance results and plots
 
 
 ## C++ Implementation
