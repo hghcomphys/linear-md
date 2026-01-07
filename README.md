@@ -4,7 +4,7 @@ This repository presents my experiments on implementing a *linear-scaling* molec
 The primary focus is on improving performance using **cell list** and **neighbor list** methods, in comparison to my previous [simple MD](https://github.com/hghcomphys/simulational-physics/tree/master/simple_md) implementation. 
 These techniques reduce the computational complexity of force calculations from *O(N²)* to approximately *O(N)* for short-range interactions, where *N* is the number of atoms in the system.
 
-Additionally, this project serves as a **showcase** demonstrating that a Python implementation using the [Numba](https://numba.pydata.org/) compiler provides a powerful alternative to C++ for scientific computing, offering a more efficient and productive development experience without compromising performance.
+Additionally, this project serves as a showcase demonstrating that a Python implementation using the [Numba](https://numba.pydata.org/) compiler provides a powerful alternative to C++ for scientific computing, offering a more efficient and productive development experience without compromising performance.
 
 ## Repository Structure
 
@@ -44,7 +44,7 @@ make profile
 
 This target typically invokes the Linux `perf` command on the `md.x` executable to collect hardware performance counters.
 
-Below are profiling results for a simulation with **4000 atoms** and **1000 time steps**:
+Below are profiling results for a simulation with 4000 atoms and 1000 time steps:
 
 ```text
  Performance counter stats for './md.x':
@@ -61,14 +61,14 @@ Below are profiling results for a simulation with **4000 atoms** and **1000 time
 ```
 
 
-## Python (Numba) Implementation
+## Python Implementation
 
 The Python implementation uses **Numba** to JIT-compile performance-critical sections of the code, enabling near-native execution speed while maintaining a high-level, readable codebase.
 
 
 ### Environment Setup
 
-The project uses **Pixi** to manage dependencies and environments.
+The project uses *Pixi* to manage dependencies and environments.
 
 To create and activate the environment:
 
@@ -76,7 +76,7 @@ To create and activate the environment:
 pixi shell
 ```
 
-This installs and activates all required Python packages, including **Numba**.
+This installs and activates all required Python packages, including Numba.
 
 
 ### Run the Simulation
@@ -87,7 +87,7 @@ Once the environment is active, execute:
 python md.py
 ```
 
-This runs the molecular dynamics simulation using the Numba-accelerated Python implementation.
+This runs the MD simulation using the Python implementation.
 
 
 ### Performance Profiling
@@ -100,7 +100,7 @@ You can collect hardware performance counters using `perf`:
 perf stat -e cycles,instructions,cache-references,cache-misses python md.py
 ```
 
-Profiling results for **4000 atoms** and **1000 time steps**:
+Profiling results for 4000 atoms and 1000 time steps:
 
 ```text
  Performance counter stats for 'python md.py':
@@ -117,6 +117,7 @@ Profiling results for **4000 atoms** and **1000 time steps**:
 ```
 
 Python with Numba achieves comparable scaling, with only a moderate (~1.7×) performance penalty.
+
 
 #### Python-specific profiling
 
@@ -137,9 +138,8 @@ To run the full benchmark suite, execute:
 python run_benchmark.py
 ```
 
-This script generates cubic lattices with varying numbers of atoms (`argon.xyz`) and runs molecular dynamics simulations for **1000 time steps** using both the **C++** and **Python (Numba)** implementations.
-
-Using the Python implementation, it is feasible to simulate **up to one million atoms on a standard laptop**, demonstrating the effectiveness of Numba for large-scale scientific computing.
+This script generates cubic lattices with varying numbers of atoms (`argon.xyz`) and runs molecular dynamics simulations for 1000 time steps using both the C++ and Python (Numba) implementations.
+Using the Python implementation, it is feasible to simulate million atoms on my laptop, demonstrating the effectiveness of Numba for large-scale scientific computing.
 
 
 ### Results
@@ -148,7 +148,7 @@ Using the Python implementation, it is feasible to simulate **up to one million 
 
 The below figure shows the execution time of a Lennard–Jones MD simulation as a function of the number of atoms, for system sizes ranging from 4,000 up to 1 million atoms, executed on a laptop. Each data point corresponds to 1000 MD time steps.
 
-<img src="benchmark/scaling.png" width="600">
+<img src="benchmark/scaling.png" width="700">
 
 Both the C++ and Python (Numba) implementations exhibit a clear **linear scaling** behavior, demonstrating that the use of cell lists and neighbor lists effectively reduces the computational complexity of force evaluations to approximately *O(N)* for short-range interactions. The near-straight lines indicate that the per-atom computational cost remains approximately constant as the system size increases.
 
@@ -158,13 +158,14 @@ Both the C++ and Python (Numba) implementations exhibit a clear **linear scaling
 The C++ implementation consistently achieves lower execution times, as expected, while the Python (Numba) implementation follows the same trend with only a moderate performance overhead. 
 This notably highlights Numba’s competitive performance, alternative to C++, for large-scale MD simulations.
 
-<img src="benchmark/performance.png" width="600">
+<img src="benchmark/performance.png" width="700">
 
-
-### Memory
+<!-- 
+#### Memory
 
 For large systems, both implementations exhibit similar memory usage.
-For smaller systems, the Python implementation requires slightly more memory due to runtime overhead and data structures.
+For smaller systems, the Python implementation requires more memory. 
+-->
 
 
 
