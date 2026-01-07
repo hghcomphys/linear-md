@@ -1,3 +1,15 @@
+# Experimental linear-scaling molecular dynamics code implemented using
+# cell-list and neighbor-list methods.
+#
+# References:
+#  1. https://github.com/a-amouei/fmd
+#  2. https://github.com/brucefan1983/Molecular-Dynamics-Simulation
+#
+# Author:
+#   Hossein Ghorbanfekr
+#   January 2026
+#   https://github.com/hghcomphys
+
 import math
 from typing import NamedTuple, TextIO
 

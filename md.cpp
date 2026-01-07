@@ -1,13 +1,14 @@
 /*
- * Experimental linear molecular dynamics code implemented using
+ * Experimental linear-scaling molecular dynamics code implemented using
  * cell-list and neighbor-list methods.
  *
  * References:
  *  1. https://github.com/a-amouei/fmd
  *  2. https://github.com/brucefan1983/Molecular-Dynamics-Simulation
  *
- * Modified by:
- *   Hossein Ghorbanfekr (2025)
+ * Author:
+ *   Hossein Ghorbanfekr
+ *   December 2025
  *   https://github.com/hghcomphys
  */
 
