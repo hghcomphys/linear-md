@@ -1,19 +1,7 @@
 # Linear MD
 
-This repository contains experiments on implementing linear-scaling molecular dynamics (MD) algorithms. 
-The focus is on improving performance by using **cell list** and **neighbor list** methods, which reduce the computational complexity of force calculations from *O(N²)* to approximately *O(N)* for short-range interactions.
-
-<!-- 
-## Results
-The performance evaluation shows that the Python Numba implementation achieves performance comparable to the C++ version, demonstrating that JIT compilation can effectively narrow the gap between high-level and low-level languages for molecular dynamics workloads.
-That said, the C++ implementation remains approximately 1.5× faster than the Python version for a system of 4000 atoms and 1000 time steps. 
-
-Profiling indicates that this advantage is primarily due to the lower number of executed instructions in the C++ code path, rather than fundamental differences in memory behavior or CPU efficiency. 
-Despite the higher instruction count in Python, key hardware-level metrics remain remarkably similar between the two implementations. 
-In particular, instructions per cycle (IPC) are comparable (around 1.5×), and cache miss rates fall within the same range (approximately 11–15%). 
-This suggests that both versions exhibit similar data access patterns and cache locality, and that the performance gap is largely attributable to language-level overhead rather than architectural inefficiencies.
--->
-
+This repository shows my experiments on implementing linear-scaling molecular dynamics (MD) simulator. 
+The focus is on improving performance by using **cell list** and **neighbor list** methods in comparison to a [simple MD](https://github.com/hghcomphys/simulational-physics/tree/master/simple_md), which reduce the computational complexity of force calculations from *O(N²)* to approximately *O(N)* for short-range interactions.
 
 ## C++ Implementation
 
@@ -44,7 +32,23 @@ To analyze performance on Linux systems, you can profile the executable using `p
 make profile
 ```
 
-This typically runs `perf record` and/or `perf report` on `md.x`.
+This typically runs linux `perf` command on `md.x` executable.
+
+Profiling results for a simulation with 4000 atoms and 1000 time steps:
+
+```text
+ Performance counter stats for './md.x':
+
+    19.647.672.034      cycles
+    35.184.297.731      instructions              #    1,79  insn per cycle
+       476.082.499      cache-references
+        79.637.529      cache-misses              #   16,728 % of all cache refs
+
+       4,929873145 seconds time elapsed
+
+       4,929639000 seconds user
+       0,000000000 seconds sys
+```
 
 
 ## Python (Numba) Implementation
@@ -79,8 +83,48 @@ Hardware-level profiling
 perf stat -e cycles,instructions,cache-references,cache-misses python md.py 
 ```
 
+Profiling results for a simulation with 4000 atoms and 1000 time steps:
+
+```text
+ Performance counter stats for 'python md.py':
+
+    34.785.338.573      cycles
+    52.160.003.366      instructions              #    1,50  insn per cycle
+       600.427.540      cache-references
+       141.996.840      cache-misses              #   23,649 % of all cache refs
+
+       8,257291531 seconds time elapsed
+
+       9,022870000 seconds user
+       0,104217000 seconds sys
+```
+
+
 Python specific profiling using `scalene`
 
 ```bash
 scalene python md.py
 ```
+
+## Benchmarks
+
+Run benchmark via running the following python script
+```bash
+python run_benchmark.py
+```
+
+This will generate lattices with varying numbers of atoms (`argon.xyz`) and run molecular dynamics simulations for 1000 time steps using both the C++ and Python (Numba) implementations.
+
+Using the Python implementation, it is feasible to simulate one million atoms on a standard laptop.
+
+### Results
+
+(Linear) scaling
+
+<img src="benchmark/scaling.png" width="400">
+
+Performance comparison
+
+<img src="benchmark/performance.png" width="400">
+
+

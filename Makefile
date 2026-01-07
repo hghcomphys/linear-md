@@ -14,7 +14,7 @@ SRC: $(SRC)
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRC)
 
 run: SRC $(TARGET)
-	time ./$(TARGET)
+	./$(TARGET)
 
 profile: $(SRC) 
 	$(CXX) $(CXXFLAGS) -pg  -o $(TARGET) $(SRC)
