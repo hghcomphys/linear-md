@@ -64,6 +64,7 @@ def simulate(
     box = particles.box
     cells, neighbors = initialize_neighbors(params, box)
     update_neighbors(particles, params, cells, neighbors)
+    print(cells.num_atoms_per_cell)
 
     potential_energy = np.empty(1, dtype=FLOAT)
     compute_force(particles, params, neighbors, potential_energy)

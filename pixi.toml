@@ -10,10 +10,12 @@ version = "0.1.0"
 
 [dependencies]
 python = "3.12.*"
-numba = ">=0.63.1,<0.64"
+numba = ">=0.65.1,<0.66"
 scalene = ">=1.5.51,<2"
 ase = ">=3.27.0,<4"
 pandas = ">=2.3.3,<3"
+numba-cuda = ">=0.30.1,<0.31"
+cuda-version = "12.*"
 
 [pypi-dependencies]
 py-cpuinfo = "*"
