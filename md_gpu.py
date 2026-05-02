@@ -41,10 +41,9 @@ class Particles(NamedTuple):
     position_old: DeviceArray
 
 
-class ParticlesHost(NamedTuple):
+class NeighborUpdateInputs(NamedTuple):
     position: Array
     box: Array
-    position_old: Array
 
 
 class CellList(NamedTuple):
@@ -102,13 +101,13 @@ def simulate(
 
     box = particles.box
     cells, neighbors = initialize_neighbors(params, box)
-    particles_host = ParticlesHost(
+    neighbor_update_inputs_host = NeighborUpdateInputs(
         position=particles.position.copy_to_host(),
         box=particles.box.copy_to_host(),
-        position_old=particles.position_old.copy_to_host(),
+        # position_old=particles.position_old.copy_to_host(),
     )
     update_neighbors(
-        particles_host,
+        neighbor_update_inputs_host,
         params,
         cells,
         neighbors,
@@ -136,8 +135,8 @@ def simulate(
             f" {'AvgCell':10}"
         )
         num_neighbor_updates = 1
-        check_result_host = np.zeros(1, dtype=np.float32)
-        check_result = cuda.to_device(check_result_host)
+        check_neighbor_result_host = np.zeros(1, dtype=np.float32)
+        check_neighbor_result = cuda.to_device(check_neighbor_result_host)
 
         for step in range(steps):
             if step % log_frequency == 0:
@@ -161,25 +160,24 @@ def simulate(
             # Next time step (update r, v, and F)
             verlet_integration_position_kernel[blocks, threads](particles, params)
 
-            # check_if_neighbor_need_update_kernel[blocks, threads](
-            #     particles, params, check_result
-            # )
-            # check_result.copy_to_host(check_result_host)
-            # if check_result_host[0] > 0:
-            #     particles.position.copy_to_host(particles_host.position)
-            #     particles.box.copy_to_host(particles_host.box)
-            #     particles.position_old.copy_to_host(particles_host.position_old)
-            #     update_neighbors(particles_host, params, cells, neighbors)
-            #     check_result_host[0] = 0
-            #     cuda.to_device(check_result_host, to=check_result)
-            #     num_neighbor_updates += 1
+            check_if_neighbor_need_update_kernel[blocks, threads](
+                particles, params, check_neighbor_result
+            )
+            check_neighbor_result.copy_to_host(check_neighbor_result_host)
+            if check_neighbor_result_host[0] > 0:
+                particles.position.copy_to_host(neighbor_update_inputs_host.position)
+                particles.box.copy_to_host(neighbor_update_inputs_host.box)
+                update_neighbors(neighbor_update_inputs_host, params, cells, neighbors)
+                check_neighbor_result_host[0] = 0
+                cuda.to_device(check_neighbor_result_host, to=check_neighbor_result)
+                particles.position_old[:] = particles.position  # copying on the device
+                num_neighbor_updates += 1
 
             compute_force_kernel[blocks, threads](
                 particles, params, neighbors, potential_energy
             )
             verlet_integration_velocity_kernel[blocks, threads](particles, params)
 
-            particles.position_old[:] = particles.position  # on device copy
 
 
 @cuda.jit
@@ -251,7 +249,6 @@ def compute_force_kernel(
             force[ni, 0] += dx * fij
             force[ni, 1] += dy * fij
             force[ni, 2] += dz * fij
-
             # pe = 0.5 * (e4s12 * r12inv - e4s6 * r6inv)
             # cuda.atomic.add(potential_energy, 0, pe)
 
@@ -347,7 +344,7 @@ def initialize_neighbors(
 
 @njit
 def update_neighbors(
-    particles: ParticlesHost,
+    particles: NeighborUpdateInputs,
     params: Parameters,
     cells: CellList,
     neighbors: NeighborList,
@@ -432,12 +429,6 @@ def update_neighbors(
                                                 neighbors.num_neighbors_per_atom[nj],
                                             ] = ni
                                             neighbors.num_neighbors_per_atom[nj] += 1
-
-    # Update old position
-    for n in range(params.num_atoms):
-        particles.position_old[n, 0] = position[n, 0]
-        particles.position_old[n, 1] = position[n, 1]
-        particles.position_old[n, 2] = position[n, 2]
 
 
 @jit(nopython=True, inline="always")
