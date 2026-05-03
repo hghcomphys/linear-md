@@ -1,18 +1,18 @@
-import os
-
+# import os
 # os.environ["NUMBA_ENABLE_CUDASIM"] = "1"
+
+from numba.cuda.cudadrv.devicearray import DeviceNDArray
+# DeviceNDArray = NDArray
 
 import math
 from typing import NamedTuple
 
+from numba.cuda.cudadrv.driver import Device
 import numpy as np
 from numba import jit, njit
 from numba import cuda
 from numpy.typing import NDArray
 
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
-
-# DeviceNDArray = NDArray
 
 FLOAT = np.float64
 ORDER = "C"
@@ -41,11 +41,6 @@ class Particles(NamedTuple):
     position_old: DeviceArray
 
 
-class NeighborUpdateInputs(NamedTuple):
-    position: Array
-    box: Array
-
-
 class CellList(NamedTuple):
     num_atoms_per_cell: NDArray
     atom_index: NDArray
@@ -55,6 +50,12 @@ class CellList(NamedTuple):
 class NeighborList(NamedTuple):
     num_neighbors_per_atom: NDArray
     neighbor_index: NDArray
+
+
+class UpdateNeighborParticleInputs(NamedTuple):
+    position: Array
+    box: Array
+
 
 
 def main() -> None:
@@ -87,7 +88,6 @@ def main() -> None:
     print(f"Number of atoms: {params.num_atoms}")
     print(f"Box matrix H:\n{particles.box.copy_to_host().reshape(3, 3)}")
     simulate(params, particles, steps=1001)
-
     print("Done.")
 
 
@@ -101,16 +101,20 @@ def simulate(
 
     box = particles.box
     cells, neighbors = initialize_neighbors(params, box)
-    neighbor_update_inputs_host = NeighborUpdateInputs(
+
+    particles_host = UpdateNeighborParticleInputs(
         position=particles.position.copy_to_host(),
         box=particles.box.copy_to_host(),
-        # position_old=particles.position_old.copy_to_host(),
     )
-    update_neighbors(
-        neighbor_update_inputs_host,
+    update_neighbors( # this function runs on the host
+        particles_host,
         params,
         cells,
         neighbors,
+    )
+    neighbors_dev = NeighborList(
+        num_neighbors_per_atom=cuda.to_device(neighbors.num_neighbors_per_atom),
+        neighbor_index=cuda.to_device(neighbors.neighbor_index),
     )
 
     threads = 32
@@ -119,7 +123,7 @@ def simulate(
 
     potential_energy = cuda.device_array(1, dtype=FLOAT)
     compute_force_kernel[blocks, threads](
-        particles, params, neighbors, potential_energy
+        particles, params, neighbors_dev, potential_energy
     )
 
     with open(filename, "w") as file:
@@ -139,6 +143,7 @@ def simulate(
         check_neighbor_result = cuda.to_device(check_neighbor_result_host)
 
         for step in range(steps):
+
             if step % log_frequency == 0:
                 # pe = potential_energy.copy_to_host()[0]
                 velocity = particles.velocity.copy_to_host()
@@ -165,19 +170,28 @@ def simulate(
             )
             check_neighbor_result.copy_to_host(check_neighbor_result_host)
             if check_neighbor_result_host[0] > 0:
-                particles.position.copy_to_host(neighbor_update_inputs_host.position)
-                particles.box.copy_to_host(neighbor_update_inputs_host.box)
-                update_neighbors(neighbor_update_inputs_host, params, cells, neighbors)
+                # ---
+                particles.position.copy_to_host(particles_host.position)
+                particles.box.copy_to_host(particles_host.box)
+                update_neighbors(particles_host, params, cells, neighbors)
+                cuda.to_device(
+                    neighbors.num_neighbors_per_atom,
+                    to=neighbors_dev.num_neighbors_per_atom,
+                )
+                cuda.to_device(
+                    neighbors.neighbor_index, 
+                    to=neighbors_dev.neighbor_index,
+                )
+                # ---
                 check_neighbor_result_host[0] = 0
                 cuda.to_device(check_neighbor_result_host, to=check_neighbor_result)
                 particles.position_old[:] = particles.position  # copying on the device
                 num_neighbor_updates += 1
 
             compute_force_kernel[blocks, threads](
-                particles, params, neighbors, potential_energy
+                particles, params, neighbors_dev, potential_energy
             )
             verlet_integration_velocity_kernel[blocks, threads](particles, params)
-
 
 
 @cuda.jit
@@ -344,7 +358,7 @@ def initialize_neighbors(
 
 @njit
 def update_neighbors(
-    particles: NeighborUpdateInputs,
+    particles: UpdateNeighborParticleInputs,
     params: Parameters,
     cells: CellList,
     neighbors: NeighborList,
