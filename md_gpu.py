@@ -7,7 +7,6 @@ from numba.cuda.cudadrv.devicearray import DeviceNDArray
 import math
 from typing import NamedTuple
 
-from numba.cuda.cudadrv.driver import Device
 import numpy as np
 from numba import jit, njit
 from numba import cuda
@@ -15,7 +14,7 @@ from numpy.typing import NDArray
 
 
 FLOAT = np.float64
-ORDER = "C"
+ORDER = "F"
 Array = NDArray[FLOAT]
 DeviceArray = DeviceNDArray
 
@@ -52,10 +51,9 @@ class NeighborList(NamedTuple):
     neighbor_index: NDArray
 
 
-class UpdateNeighborParticleInputs(NamedTuple):
+class NeighborParticles(NamedTuple):
     position: Array
     box: Array
-
 
 
 def main() -> None:
@@ -68,7 +66,7 @@ def main() -> None:
         temperature=60.0,
         cutoff_radius=9.0,
         skin_radius=1.0,
-        neighbor_max_atoms=500,
+        neighbor_max_atoms=300,
     )
     mass = np.array([ATOMIC_MASS[a[0]] for a in atoms])
     position = np.array([a[1:4] for a in atoms], dtype=FLOAT, order=ORDER)
@@ -95,14 +93,14 @@ def simulate(
     params: Parameters,
     particles: Particles,
     steps: int = 1,
-    log_frequency: int = 100,
+    log_frequency: int = 1000,
     filename: str = "out.xyz",
 ) -> None:
 
     box = particles.box
     cells, neighbors = initialize_neighbors(params, box)
 
-    particles_host = UpdateNeighborParticleInputs(
+    particles_host = NeighborParticles(
         position=particles.position.copy_to_host(),
         box=particles.box.copy_to_host(),
     )
@@ -112,7 +110,7 @@ def simulate(
         cells,
         neighbors,
     )
-    neighbors_dev = NeighborList(
+    neighbors_device = NeighborList(
         num_neighbors_per_atom=cuda.to_device(neighbors.num_neighbors_per_atom),
         neighbor_index=cuda.to_device(neighbors.neighbor_index),
     )
@@ -123,7 +121,7 @@ def simulate(
 
     potential_energy = cuda.device_array(1, dtype=FLOAT)
     compute_force_kernel[blocks, threads](
-        particles, params, neighbors_dev, potential_energy
+        particles, params, neighbors_device, potential_energy
     )
 
     with open(filename, "w") as file:
@@ -176,11 +174,11 @@ def simulate(
                 update_neighbors(particles_host, params, cells, neighbors)
                 cuda.to_device(
                     neighbors.num_neighbors_per_atom,
-                    to=neighbors_dev.num_neighbors_per_atom,
+                    to=neighbors_device.num_neighbors_per_atom,
                 )
                 cuda.to_device(
                     neighbors.neighbor_index, 
-                    to=neighbors_dev.neighbor_index,
+                    to=neighbors_device.neighbor_index,
                 )
                 # ---
                 check_neighbor_result_host[0] = 0
@@ -189,7 +187,7 @@ def simulate(
                 num_neighbor_updates += 1
 
             compute_force_kernel[blocks, threads](
-                particles, params, neighbors_dev, potential_energy
+                particles, params, neighbors_device, potential_energy
             )
             verlet_integration_velocity_kernel[blocks, threads](particles, params)
 
@@ -335,11 +333,12 @@ def initialize_neighbors(
         atom_index=cell_atom_index,
     )
     # Neighbor list
-    neighbor_index = np.empty(
+    neighbor_index = cuda.pinned_array(
         shape=(params.num_atoms, params.neighbor_max_atoms),
         dtype=np.int32,
     )
-    neighbor_num_atoms = np.empty(
+    # neighbor_num_atoms = np.empty(
+    neighbor_num_atoms = cuda.pinned_array(
         params.num_atoms,
         dtype=np.int32,
     )
@@ -355,10 +354,11 @@ def initialize_neighbors(
         neighbors,
     )
 
-
-@njit
+# from numba import prange
+# @njit(parallel=True)
+@njit()
 def update_neighbors(
-    particles: UpdateNeighborParticleInputs,
+    particles: NeighborParticles,
     params: Parameters,
     cells: CellList,
     neighbors: NeighborList,
@@ -369,23 +369,21 @@ def update_neighbors(
     length = box[0], box[4], box[8]
     nc = cells.sizes
 
-    # Cell list
-    for ic0 in range(nc[0]):
-        for ic1 in range(nc[1]):
-            for ic2 in range(nc[2]):
-                cells.num_atoms_per_cell[index3d((ic0, ic1, ic2), nc)] = 0
+    cells.num_atoms_per_cell[:] = 0
+    neighbors.num_neighbors_per_atom[:] = 0
 
+    atoms_cell_index = np.empty(params.num_atoms, dtype=np.int32)
     for n in range(params.num_atoms):
         ic0 = math.floor(position[n, 0] * nc[0] / length[0])
         ic1 = math.floor(position[n, 1] * nc[1] / length[1])
         ic2 = math.floor(position[n, 2] * nc[2] / length[2])
         idx = index3d((ic0, ic1, ic2), nc)
+        atoms_cell_index[n] = idx
+    # ---
+    for n in range(params.num_atoms):
+        idx = atoms_cell_index[n]
         cells.atom_index[idx, cells.num_atoms_per_cell[idx]] = n
         cells.num_atoms_per_cell[idx] += 1
-
-    # Neighbor list
-    for n in range(params.num_atoms):
-        neighbors.num_neighbors_per_atom[n] = 0
 
     for ic0 in range(nc[0]):
         for ic1 in range(nc[1]):
