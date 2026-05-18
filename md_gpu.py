@@ -66,7 +66,7 @@ def main() -> None:
         temperature=60.0,
         cutoff_radius=9.0,
         skin_radius=1.0,
-        neighbor_max_atoms=300,
+        neighbor_max_atoms=500,
     )
     mass = np.array([ATOMIC_MASS[a[0]] for a in atoms])
     position = np.array([a[1:4] for a in atoms], dtype=FLOAT, order=ORDER)
@@ -85,7 +85,7 @@ def main() -> None:
 
     print(f"Number of atoms: {params.num_atoms}")
     print(f"Box matrix H:\n{particles.box.copy_to_host().reshape(3, 3)}")
-    simulate(params, particles, steps=1001)
+    simulate(params, particles, steps=1_001)
     print("Done.")
 
 
@@ -93,7 +93,7 @@ def simulate(
     params: Parameters,
     particles: Particles,
     steps: int = 1,
-    log_frequency: int = 1000,
+    log_frequency: int = 100,
     filename: str = "out.xyz",
 ) -> None:
 
@@ -143,17 +143,20 @@ def simulate(
         for step in range(steps):
 
             if step % log_frequency == 0:
-                # pe = potential_energy.copy_to_host()[0]
                 velocity = particles.velocity.copy_to_host()
                 mass = particles.mass.copy_to_host()
                 ke = get_kinetic_energy(velocity, mass)
+                # pe = potential_energy.copy_to_host()[0]
+                position = particles.position.copy_to_host()
+                box = particles.box.copy_to_host()
+                pe = get_potential_energy(position, box, params, neighbors)
                 print(
                     f"{step:<8}"
                     # f" {step * params.time_step:<12.8f}"
                     f" {get_temperature(velocity, mass):<10.4f}"
                     f" {ke:<10.4f}"
-                    # f" {pe:<10.4f}"
-                    # f" {ke + pe:<10.4f}"
+                    f" {pe:<10.4f}"
+                    f" {ke + pe:<10.4f}"
                     f" {num_neighbor_updates:<10}"
                     f" {neighbors.num_neighbors_per_atom.mean():<10.0f}"
                     f" {cells.num_atoms_per_cell.mean():<10.0f}"
@@ -183,7 +186,7 @@ def simulate(
                 # ---
                 check_neighbor_result_host[0] = 0
                 cuda.to_device(check_neighbor_result_host, to=check_neighbor_result)
-                particles.position_old[:] = particles.position  # copying on the device
+                particles.position_old[:] = particles.position  # on device copy
                 num_neighbor_updates += 1
 
             compute_force_kernel[blocks, threads](
@@ -191,6 +194,47 @@ def simulate(
             )
             verlet_integration_velocity_kernel[blocks, threads](particles, params)
 
+@njit
+def get_potential_energy(
+    position: Array,
+    box: Array,
+    params: Parameters,
+    neighbors: NeighborList,
+) -> float:
+    epsilon = FLOAT(1.032e-2)
+    sigma = FLOAT(3.405)
+    epsilon = FLOAT(1.032e-2)
+    sigma = FLOAT(3.405)
+    sigma3 = sigma * sigma * sigma
+    sigma6 = sigma3 * sigma3
+    sigma12 = sigma6 * sigma6
+    e4s6 = 4.0 * epsilon * sigma6
+    e4s12 = 4.0 * epsilon * sigma12
+
+    cutoff2 = params.cutoff_radius * params.cutoff_radius
+    length = box[0], box[4], box[8]
+
+    potential_energy = 0.0
+
+    for ni in range(params.num_atoms):
+        for j in range(neighbors.num_neighbors_per_atom[ni]):
+            nj = neighbors.neighbor_index[ni, j]
+
+            if ni < nj:
+                dx = apply_pbc(position[nj, 0] - position[ni, 0], length[0])
+                dy = apply_pbc(position[nj, 1] - position[ni, 1], length[1])
+                dz = apply_pbc(position[nj, 2] - position[ni, 2], length[2])
+                r2 = dx * dx + dy * dy + dz * dz
+                if r2 > cutoff2:
+                    continue
+                r2inv = 1.0 / r2
+                r4inv = r2inv * r2inv
+                r6inv = r2inv * r4inv
+                r8inv = r4inv * r4inv
+                r12inv = r4inv * r8inv
+                potential_energy += e4s12 * r12inv - e4s6 * r6inv
+
+    return potential_energy
 
 @cuda.jit
 def check_if_neighbor_need_update_kernel(
@@ -446,7 +490,6 @@ def update_neighbors(
 @jit(nopython=True, inline="always")
 def index3d(ic: tuple[int, int, int], nc: tuple[int, int, int]) -> int:
     return ic[0] + nc[0] * (ic[1] + nc[1] * ic[2])
-
 
 @njit
 def get_kinetic_energy(velocity: Array, mass: Array) -> FLOAT:
