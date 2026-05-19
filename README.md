@@ -1,10 +1,10 @@
 # Linear MD
 
-This repository presents my experiments on implementing a *linear-scaling* molecular dynamics (MD) simulation.
-The primary focus is on improving performance using **cell list** and **neighbor list** methods, in comparison to my previous [simple MD](https://github.com/hghcomphys/simulational-physics/tree/master/simple_md) implementation. 
+This repository shows my attempts on implementing a *linear-scaling* molecular dynamics (MD) simulation.
+The main focus is on improving performance using **cell list** and **neighbor list** methods, in comparison to my previous [simple MD](https://github.com/hghcomphys/simulational-physics/tree/master/simple_md) implementation. 
 These techniques reduce the computational complexity of force calculations from *O(N²)* to approximately *O(N)* for short-range interactions, where *N* is the number of atoms in the system.
 
-Additionally, this project serves as a showcase demonstrating that a Python implementation using the [Numba](https://numba.pydata.org/) compiler provides a powerful alternative to C++ for scientific computing, offering a more efficient and productive development experience without compromising performance.
+Additionally, it showcases that a Python implementation using the [Numba](https://numba.pydata.org/) compiler is a powerful alternative to C++ for scientific computing, offering a more efficient and productive development experience without compromising performance.
 
 An example MD system with 4000 Argon atoms.
 
