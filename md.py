@@ -21,8 +21,8 @@ FLOAT = np.float64
 Array = NDArray[FLOAT]
 ORDER = "C"
 
-K_B = 8.617343e-5  # Boltzmann's constant in natural unit
-TIME_UNIT_CONVERSION = 1.018051e1  # from natural unit to fs
+K_B = 8.617343e-5  # eV/K 
+FS_TO_NATURAL = 1.0 / 1.018051e1  
 
 
 class Parameters(NamedTuple):
@@ -104,7 +104,6 @@ def simulate(
             compute_force(particles, params, neighbors, potential_energy)
             verlet_integration_velocity(particles, params)
 
-
 @njit
 def compute_force(
     particles: Particles,
@@ -114,15 +113,13 @@ def compute_force(
 ) -> None:
     epsilon = FLOAT(1.032e-2)
     sigma = FLOAT(3.405)
-    epsilon = FLOAT(1.032e-2)
-    sigma = FLOAT(3.405)
     sigma3 = sigma * sigma * sigma
     sigma6 = sigma3 * sigma3
     sigma12 = sigma6 * sigma6
-    e24s6 = 24.0 * epsilon * sigma6
-    e48s12 = 48.0 * epsilon * sigma12
-    e4s6 = 4.0 * epsilon * sigma6
-    e4s12 = 4.0 * epsilon * sigma12
+    e24s6 = FLOAT(24.0) * epsilon * sigma6
+    e48s12 = FLOAT(48.0) * epsilon * sigma12
+    e4s6 = FLOAT(4.0) * epsilon * sigma6
+    e4s12 = FLOAT(4.0) * epsilon * sigma12
 
     box = particles.box
     force = particles.force
@@ -130,10 +127,10 @@ def compute_force(
     cutoff2 = params.cutoff_radius * params.cutoff_radius
     length = box[0], box[4], box[8]
 
-    potential_energy[0] = 0.0
+    potential_energy[0] = FLOAT(0.0)
     for ni in range(params.num_atoms):
         fi = particles.force[ni]
-        fi[0] = fi[1] = fi[2] = 0.0
+        fi[0] = fi[1] = fi[2] = FLOAT(0.0)
 
     for ni in range(params.num_atoms):
         for j in range(neighbors.num_neighbors_per_atom[ni]):
@@ -146,7 +143,7 @@ def compute_force(
                 r2 = dx * dx + dy * dy + dz * dz
                 if r2 > cutoff2:
                     continue
-                r2inv = 1.0 / r2
+                r2inv = FLOAT(1.0) / r2
                 r4inv = r2inv * r2inv
                 r6inv = r2inv * r4inv
                 r8inv = r4inv * r4inv
@@ -335,9 +332,9 @@ def apply_pbc(
     rij: FLOAT,
     length: FLOAT,
 ) -> FLOAT:
-    if rij >= 0.5 * length:
+    if rij >= FLOAT(0.5) * length:
         rij -= length
-    elif rij <= -0.5 * length:
+    elif rij <= FLOAT(-0.5) * length:
         rij += length
     return rij
 
@@ -367,12 +364,11 @@ def verlet_integration_position(
         for dim in range(3):
             r[n, dim] = np.fmod(
                 r[n, dim]
-                + dt * (v[n, dim] + 0.5 * dt / m[n] * f[n, dim])
-                + 100.0 * length[dim],
+                + dt * (v[n, dim] + FLOAT(0.5) * dt / m[n] * f[n, dim])
+                + FLOAT(100.0) * length[dim],
                 length[dim],
             )
-            v[n, dim] += 0.5 * dt / m[n] * f[n, dim]
-
+            v[n, dim] += FLOAT(0.5) * dt / m[n] * f[n, dim]
 
 @njit
 def verlet_integration_velocity(
@@ -383,7 +379,7 @@ def verlet_integration_velocity(
     m, v, f = particles.mass, particles.velocity, particles.force
     for n in range(params.num_atoms):
         for dim in range(3):
-            v[n, dim] += 0.5 * dt / m[n] * f[n, dim]
+            v[n, dim] += FLOAT(0.5) * dt / m[n] * f[n, dim]
 
 
 def save(particles: Particles, file: TextIO) -> None:
@@ -402,13 +398,13 @@ def get_kinetic_energy(particles: Particles) -> FLOAT:
     ke = FLOAT(0.0)
     for n in range(natoms):
         ke += m[n] * (v[n, 0] * v[n, 0] + v[n, 1] * v[n, 1] + v[n, 2] * v[n, 2])
-    return 0.5 * ke
+    return FLOAT(0.5) * ke
 
 
 @njit
 def get_temperature(particles: Particles) -> FLOAT:
     natoms = len(particles.velocity)
-    return 2.0 / (3 * natoms * K_B) * get_kinetic_energy(particles)
+    return FLOAT(2.0) / (FLOAT(3) * natoms * K_B) * get_kinetic_energy(particles)
 
 
 def read_xyz(filename: str) -> tuple:
@@ -429,14 +425,14 @@ def read_xyz(filename: str) -> tuple:
 
 
 def main() -> None:
-    ATOMIC_MASS = {"Ar": 40.0}
+    ATOMIC_MASS = {"Ar": 40.0}  # amu
     atoms, box = read_xyz("argon.xyz")
     params = Parameters(
         num_atoms=len(atoms),
-        time_step=0.5 / TIME_UNIT_CONVERSION,
-        temperature=60.0,
-        cutoff_radius=9.0,
-        skin_radius=1.0,
+        time_step=0.5 * FS_TO_NATURAL,
+        temperature=60.0, # Kelvin
+        cutoff_radius=9.0,  # Angstrom
+        skin_radius=1.0,  # Angstrom
         neighbor_max_atoms=500,
     )
     mass = np.array([ATOMIC_MASS[a[0]] for a in atoms])
