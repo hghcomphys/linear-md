@@ -1,4 +1,4 @@
-[project]
+[workspace]
 authors = ["Hossein Ghorbanfekr <hgh.comphys@gmail.com>"]
 channels = ["conda-forge"]
 description = "Implementing Linear molecular dynamics from scratch"
@@ -14,6 +14,9 @@ numba = ">=0.63.1,<0.64"
 scalene = ">=1.5.51,<2"
 ase = ">=3.27.0,<4"
 pandas = ">=2.3.3,<3"
+jupyterlab = ">=4.6.4,<5"
 
 [pypi-dependencies]
 py-cpuinfo = "*"
+jupyterlab-vim = ">=4.1.4, <5"
+jupyterlab-spellchecker = ">=0.9.0, <0.10"
