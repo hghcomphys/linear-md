@@ -17,23 +17,32 @@ print("CPU Model:", info)
 # %%
 
 # Load CSV file
-df = pd.read_csv("benchmark_results.csv")
-print("=== Benchmark Results ===")
+df = pd.read_csv("benchmark_results_scaling.csv")
+print("=== Scaling Benchmark Results ===")
 print(df)
 
 # %%
 fig, ax = plt.subplots(figsize=(8, 5))
-plt.plot(df["atoms"], df["cpp_time_sec"], label="C++")
-plt.plot(df["atoms"], df["python_time_sec"], label="Python (Numba)")
+plt.plot(df["atoms"], df["simple_md_time_sec"], label="Simple MD")
+plt.plot(df["atoms"], df["linear_md_time_sec"], label="Linear MD")
 plt.xlabel("Number of Atoms", fontsize=13)
 plt.ylabel("Execution Time (s)", fontsize=13)
-plt.title(f"MD Simulation (1000 Time Steps)\n{info}", fontsize=13)
+plt.title(f"MD Simulation (1000 Time Steps)", fontsize=13)
 plt.legend(
-    ["C++", "Python (Numba)"], title="Implementation", loc="upper left", fontsize=13
+    [
+        "Simple MD",
+        "Linear MD",
+    ], 
+    title="Implementation", loc="upper left", fontsize=13
 )
 plt.tight_layout()
-plt.savefig("scaling.png", dpi=300)
+plt.savefig("scaling.png") #, dpi=300)
 plt.show()
+
+
+df = pd.read_csv("benchmark_results_performance.csv")
+print("=== Performance Benchmark Results ===")
+print(df)
 
 # %%
 fig, ax = plt.subplots(figsize=(8, 5))
@@ -44,10 +53,10 @@ df.plot(
 
 plt.xlabel("Number of Atoms", fontsize=13)
 plt.ylabel("Execution Time (s)", fontsize=13)
-plt.title(f"MD Simulation (1000 Time Steps)\n{info}", fontsize=13)
+plt.title(f"MD Simulation (1000 Time Steps)", fontsize=13)
 plt.legend(
     ["C++", "Python (Numba)"], title="Implementation", loc="upper left", fontsize=13
 )
 plt.tight_layout()
-plt.savefig("performance.png", dpi=300)
+plt.savefig("performance.png") #, dpi=300)
 plt.show()
