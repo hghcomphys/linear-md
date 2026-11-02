@@ -9,10 +9,10 @@ pixi run jupyter nbconvert \
     post.ipynb
 
 
-pixi run jupyter nbconvert \
-    --to markdown \
-    --TemplateExporter.exclude_output=True \
-    --output ${HOME}/site/_posts/2026-09-14-linear-molecular-dynamics-numba.md \
-    post.ipynb
+# pixi run jupyter nbconvert \
+#     --to markdown \
+#     --TemplateExporter.exclude_output=True \
+#     --output ${HOME}/site/_posts/2026-11-02-linear-molecular-dynamics-numba.md \
+#     post.ipynb
 
 
