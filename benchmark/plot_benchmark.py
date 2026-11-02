@@ -36,7 +36,7 @@ plt.legend(
     title="Implementation", loc="upper left", fontsize=13
 )
 plt.tight_layout()
-plt.savefig("scaling.png") #, dpi=300)
+plt.savefig("scaling.png", dpi=200)
 plt.show()
 
 
@@ -58,5 +58,5 @@ plt.legend(
     ["C++", "Python (Numba)"], title="Implementation", loc="upper left", fontsize=13
 )
 plt.tight_layout()
-plt.savefig("performance.png") #, dpi=300)
+plt.savefig("performance.png", dpi=200)
 plt.show()
